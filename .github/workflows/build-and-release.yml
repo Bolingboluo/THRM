@@ -166,6 +166,12 @@ jobs:
       # Switch this to release-signing after SignPath imports the production CA
       # certificate and the corresponding policy is enabled.
       SIGNPATH_SIGNING_POLICY_SLUG: test-signing
+      # Master switch for the whole signing chain. SignPath has not authorized
+      # the signing policy for this project yet, so every signing step is
+      # skipped and releases ship unsigned binaries, exactly as they did before
+      # the SignPath integration landed. Flip this to 'true' once the signing
+      # policy is approved.
+      SIGNPATH_ENABLED: 'false'
 
     steps:
       - name: Checkout
@@ -233,7 +239,7 @@ jobs:
       # signed application binaries; four SignPath requests cover the three
       # Windows executables and the final installer.
       - name: Prepare THRM.exe for SignPath
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/thrm | Out-Null
@@ -241,7 +247,7 @@ jobs:
 
       - name: Upload THRM.exe for SignPath
         id: upload-thrm
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-${{ github.run_id }}
@@ -252,7 +258,7 @@ jobs:
 
       - name: Sign THRM.exe with SignPath
         id: sign-thrm
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -265,7 +271,7 @@ jobs:
           output-artifact-directory: build/signed/thrm
 
       - name: Replace THRM.exe with the signed artifact
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/thrm -Filter 'THRM.exe' -File -Recurse | Select-Object -First 1
@@ -273,7 +279,7 @@ jobs:
           Copy-Item $signed.FullName build/bin/THRM.exe -Force
 
       - name: Prepare THRM Core.exe for SignPath
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/core | Out-Null
@@ -281,7 +287,7 @@ jobs:
 
       - name: Upload THRM Core.exe for SignPath
         id: upload-core
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-core-${{ github.run_id }}
@@ -292,7 +298,7 @@ jobs:
 
       - name: Sign THRM Core.exe with SignPath
         id: sign-core
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -305,7 +311,7 @@ jobs:
           output-artifact-directory: build/signed/core
 
       - name: Replace THRM Core.exe with the signed artifact
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/core -Filter 'THRM Core.exe' -File -Recurse | Select-Object -First 1
@@ -313,7 +319,7 @@ jobs:
           Copy-Item $signed.FullName 'build/bin/THRM Core.exe' -Force
 
       - name: Prepare THRM TempBridge.exe for SignPath
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/tempbridge | Out-Null
@@ -321,7 +327,7 @@ jobs:
 
       - name: Upload THRM TempBridge.exe for SignPath
         id: upload-tempbridge
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-tempbridge-${{ github.run_id }}
@@ -332,7 +338,7 @@ jobs:
 
       - name: Sign THRM TempBridge.exe with SignPath
         id: sign-tempbridge
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -345,7 +351,7 @@ jobs:
           output-artifact-directory: build/signed/tempbridge
 
       - name: Replace THRM TempBridge.exe with the signed artifact
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/tempbridge -Filter 'THRM TempBridge.exe' -File -Recurse | Select-Object -First 1
@@ -353,7 +359,7 @@ jobs:
           Copy-Item $signed.FullName 'build/bin/bridge/THRM TempBridge.exe' -Force
 
       - name: Rebuild the NSIS installer from signed binaries
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           Push-Location build/windows/installer
@@ -368,7 +374,7 @@ jobs:
           }
 
       - name: Prepare installer for SignPath
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/installer | Out-Null
@@ -376,7 +382,7 @@ jobs:
 
       - name: Upload installer for SignPath
         id: upload-installer
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-installer-${{ github.run_id }}
@@ -387,7 +393,7 @@ jobs:
 
       - name: Sign installer with SignPath
         id: sign-installer
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -400,7 +406,7 @@ jobs:
           output-artifact-directory: build/signed/installer
 
       - name: Replace installer with the signed artifact
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/installer -Filter 'THRM-amd64-installer.exe' -File -Recurse | Select-Object -First 1

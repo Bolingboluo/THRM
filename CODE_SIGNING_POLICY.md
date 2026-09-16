@@ -13,6 +13,13 @@ The validation tag `v0.0.0-signpath-test.2` completed successfully and published
 test pre-release. It verified Windows builds, automatic signing of `THRM.exe`, `THRM Core.exe`,
 `THRM TempBridge.exe`, and the NSIS installer, plus the signed portable archive.
 
+**Signing is currently switched off in the release workflow.** SignPath has not yet authorized
+a production signing policy for this project, so the `SIGNPATH_ENABLED` flag in
+`.github/workflows/build-and-release.yml` is set to `false` and every signing step is skipped.
+Formal releases therefore ship unsigned Windows binaries and Windows SmartScreen may warn about
+them. Flip that flag back to `true` once the production policy is approved; the artifact flow
+below needs no other change.
+
 The self-signed certificate is suitable for testing only: it is not trusted by Windows until
 the certificate is installed on the test device, and it must not be treated as a production
 release certificate. The workflow can switch to the production policy without changing the
