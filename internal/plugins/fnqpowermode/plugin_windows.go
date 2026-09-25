@@ -22,11 +22,12 @@ type Plugin struct {
 	}
 	onModeChange func(PowerModeState)
 
-	mutex   sync.Mutex
-	cancel  context.CancelFunc
-	cmd     *exec.Cmd
-	running bool
-	lastErr string
+	mutex  sync.Mutex
+	cancel context.CancelFunc
+	// generation 每次 Start 递增，run 退出时只清理自己这一代的状态。
+	generation uint64
+	running    bool
+	lastErr    string
 }
 
 func New(options Options) *Plugin {
@@ -61,11 +62,12 @@ func (p *Plugin) Start(ctx context.Context) error {
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
+	p.generation++
 	p.cancel = cancel
 	p.running = true
 	p.lastErr = ""
 
-	go p.run(runCtx)
+	go p.run(runCtx, p.generation)
 	return nil
 }
 
@@ -76,14 +78,12 @@ func (p *Plugin) Stop() error {
 	if !p.running {
 		return nil
 	}
+	// 进程由 exec.CommandContext 在 ctx 取消时杀掉。这里不能再直接读 cmd.Process：
+	// 它由 run 协程里的 cmd.Start 在锁外写入。
 	if p.cancel != nil {
 		p.cancel()
 	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
 	p.running = false
-	p.cmd = nil
 	p.cancel = nil
 	return nil
 }
@@ -100,11 +100,14 @@ func (p *Plugin) Status() plugins.Status {
 	}
 }
 
-func (p *Plugin) run(ctx context.Context) {
+func (p *Plugin) run(ctx context.Context, generation uint64) {
 	defer func() {
 		p.mutex.Lock()
-		p.running = false
-		p.cmd = nil
+		// 快速 Stop→Start 时旧实例晚于新实例退出，不能把新实例标成未运行：
+		// 那样 Stop 会直接返回，新的 PowerShell 监听进程就泄漏了。
+		if p.generation == generation {
+			p.running = false
+		}
 		p.mutex.Unlock()
 	}()
 
@@ -121,16 +124,19 @@ func (p *Plugin) run(ctx context.Context) {
 		return
 	}
 
-	p.mutex.Lock()
-	p.cmd = cmd
-	p.mutex.Unlock()
-
 	if err := cmd.Start(); err != nil {
-		p.setLastError(err)
+		// 已被 Stop 取消时的失败不算插件错误，也不能写进紧接着启动的新实例状态里。
+		if ctx.Err() == nil {
+			p.setLastError(err)
+		}
 		return
 	}
 
-	go p.scanErrors(stderr)
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		p.scanErrors(stderr)
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
@@ -141,6 +147,9 @@ func (p *Plugin) run(ctx context.Context) {
 		p.setLastError(err)
 	}
 
+	// Wait 会关闭管道，必须等 stderr 读完，否则读协程会把 "file already closed"
+	// 记成插件错误。
+	<-stderrDone
 	if err := cmd.Wait(); err != nil && ctx.Err() == nil {
 		p.setLastError(err)
 	}
