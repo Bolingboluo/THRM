@@ -1,6 +1,7 @@
 package coreapp
 
 import (
+	"math"
 	"testing"
 
 	"github.com/TIANLI0/THRM/internal/types"
@@ -127,5 +128,27 @@ func TestTrackBridgeTemperatureStaleness(t *testing.T) {
 				t.Fatalf("trackBridgeTemperatureStaleness() restart = %v, want %v", gotRestartNow, tt.wantRestartNow)
 			}
 		})
+	}
+}
+
+// TestTemperatureEMAConvergesOnRisingStep 验证升温阶跃时 EMA 能收敛到真实温度。
+// 旧实现用整数除法，n=10 时 50→60°C 只收敛到 55°C，风扇长期低于曲线。
+func TestTemperatureEMAConvergesOnRisingStep(t *testing.T) {
+	for _, n := range []int{1, 2, 3, 5, 10} {
+		ema := 50.0
+		for range 200 {
+			ema = nextTemperatureEMA(ema, 60, n)
+		}
+		if got := int(math.Round(ema)); got != 60 {
+			t.Fatalf("n=%d: 升温阶跃后 EMA 稳定在 %d°C，期望 60°C", n, got)
+		}
+
+		ema = 60.0
+		for range 200 {
+			ema = nextTemperatureEMA(ema, 50, n)
+		}
+		if got := int(math.Round(ema)); got != 50 {
+			t.Fatalf("n=%d: 降温阶跃后 EMA 稳定在 %d°C，期望 50°C", n, got)
+		}
 	}
 }

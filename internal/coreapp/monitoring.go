@@ -2,6 +2,7 @@ package coreapp
 
 import (
 	"fmt"
+	"math"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -77,6 +78,16 @@ func shouldRestartTemperatureBridge(temp types.TemperatureData) bool {
 
 	// 休眠恢复后硬件监控库偶尔会返回全 0 但进程仍能响应，重启桥接可重新初始化底层传感器。
 	return temp.CPUTemp == 0 && temp.GPUTemp == 0
+}
+
+// nextTemperatureEMA 计算窗口为 n 的温度 EMA（α = 2/(n+1)）。
+//
+// 必须用浮点累积：整数除法向下取整，升温时每步都被截掉一点，最终稳定在真实温度之下
+// （n=10 时 50→60°C 的阶跃只收敛到 55°C），风扇因此长期比曲线低几百转，
+// 自适应学习也会把这段虚低的稳态学成负偏移。降温方向则恰好能收敛，所以很难察觉。
+func nextTemperatureEMA(prev float64, sample, n int) float64 {
+	n = max(n, 1)
+	return (2*float64(sample) + float64(n-1)*prev) / float64(n+1)
 }
 
 func (a *CoreApp) recoverTemperatureBridge(reason string) {
@@ -252,7 +263,7 @@ func (a *CoreApp) startTemperatureMonitoring() {
 
 	// 温度采样使用 EMA 平滑。
 	sampleCount := max(cfg.TempSampleCount, 1)
-	tempEMA := 0
+	tempEMA := 0.0
 	tempEMAReady := false
 
 	rawTempHistory := make([]int, 0, 6)
@@ -491,13 +502,12 @@ monitorLoop:
 				}
 
 				if !tempEMAReady {
-					tempEMA = sampleTemp
+					tempEMA = float64(sampleTemp)
 					tempEMAReady = true
 				} else {
-					n := sampleCount
-					tempEMA = (2*sampleTemp + (n-1)*tempEMA) / (n + 1)
+					tempEMA = nextTemperatureEMA(tempEMA, sampleTemp, sampleCount)
 				}
-				avgTemp := tempEMA
+				avgTemp := int(math.Round(tempEMA))
 
 				recentAvgTemps = append(recentAvgTemps, avgTemp)
 				if len(recentAvgTemps) > 24 {
