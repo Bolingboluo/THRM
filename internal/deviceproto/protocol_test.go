@@ -1,6 +1,7 @@
 package deviceproto
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -220,6 +221,62 @@ func TestParseHex_Invalid(t *testing.T) {
 	_, err := ParseHex("GG")
 	if err == nil {
 		t.Error("ParseHex should fail on non-hex input")
+	}
+}
+
+// 单数字字段必须只补它自己；整体补 0 会让后面每个字节错开半个字节，
+// "5A A5 0C 03 1" 曾被解析成 05 AA 50 C0 31，发出去是另一条命令。
+func TestParseHex_SingleDigitFieldPadsOnlyItself(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []byte
+	}{
+		{"0C 1", []byte{0x0C, 0x01}},
+		{"5A A5 0C 03 1", []byte{0x5A, 0xA5, 0x0C, 0x03, 0x01}},
+		{"8 1", []byte{0x08, 0x01}},
+		{"0x8,0x1", []byte{0x08, 0x01}},
+		{"1", []byte{0x01}},
+	}
+	for _, tt := range tests {
+		got, err := ParseHex(tt.input)
+		if err != nil {
+			t.Errorf("ParseHex(%q) error: %v", tt.input, err)
+			continue
+		}
+		if !bytes.Equal(got, tt.want) {
+			t.Errorf("ParseHex(%q) = % X, want % X", tt.input, got, tt.want)
+		}
+	}
+}
+
+// 超过一位的奇数位字段分不清字节边界，猜错就是另一条命令，必须拒绝。
+func TestParseHex_RejectsAmbiguousOddField(t *testing.T) {
+	for _, input := range []string{"5AA50C031", "5A A5 0C3 01", "123"} {
+		if got, err := ParseHex(input); err == nil {
+			t.Errorf("ParseHex(%q) = % X, want error", input, got)
+		}
+	}
+}
+
+// 固件的 0x08 分支把 payload 原样写进当前挡位字段，调试控制台必须挡住 1..4 以外的值。
+func TestValidateOutboundFrame_FixedGearRange(t *testing.T) {
+	for gear := 1; gear <= 4; gear++ {
+		if err := ValidateOutboundFrame(BuildFrame(CmdSetFixedGear, byte(gear))); err != nil {
+			t.Errorf("0x08 gear %d rejected: %v", gear, err)
+		}
+	}
+	for _, frame := range [][]byte{
+		BuildFrame(CmdSetFixedGear),
+		BuildFrame(CmdSetFixedGear, 0x00),
+		BuildFrame(CmdSetFixedGear, 0x05),
+		BuildFrame(CmdSetFixedGear, 0xFF),
+	} {
+		if err := ValidateOutboundFrame(frame); err == nil {
+			t.Errorf("ValidateOutboundFrame(% X) should fail", frame)
+		}
+	}
+	if _, err := NormalizeDebugInput("08 05"); err == nil {
+		t.Error(`NormalizeDebugInput("08 05") should fail`)
 	}
 }
 

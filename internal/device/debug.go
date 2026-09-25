@@ -117,6 +117,27 @@ func (m *Manager) GetDebugFrames() []types.DeviceDebugFrame {
 	return frames
 }
 
+// debugFrameMutatesDevice 报告调试帧是否会改写设备状态，即固件以 ACK 应答的那些设置命令。
+func debugFrameMutatesDevice(frame []byte) bool {
+	parsed, ok := deviceproto.ParseFrame(frame)
+	if !ok {
+		return true
+	}
+	switch parsed.Command {
+	case deviceproto.CmdInitializeController, deviceproto.CmdClearInitializationLatch,
+		deviceproto.CmdFactoryReinitialize, deviceproto.CmdSetFixedGear,
+		deviceproto.CmdSetRuntimeProfile, deviceproto.CmdSetPowerOnStart,
+		deviceproto.CmdSetSmartStartStop, deviceproto.CmdSetRealtimeRPM,
+		deviceproto.CmdEnterRealtimeRPM, deviceproto.CmdExitRealtimeRPM,
+		deviceproto.CmdSetGearRPM, deviceproto.CmdRGBUploadInit,
+		deviceproto.CmdRGBChunkWrite, deviceproto.CmdRGBCommit,
+		deviceproto.CmdRGBDynamicParam, deviceproto.CmdRGBEnable,
+		deviceproto.CmdRGBFrameWrite, deviceproto.CmdGearLight:
+		return true
+	}
+	return false
+}
+
 func (m *Manager) SendDebugCommand(input string, waitMs int) (types.DeviceDebugCommandResult, error) {
 	if waitMs < 0 {
 		waitMs = 0
@@ -145,6 +166,14 @@ func (m *Manager) SendDebugCommand(input string, waitMs int) (types.DeviceDebugC
 	report := deviceproto.BuildReport(frame, hidControlReportLen)
 	m.recordDebugFrame("tx", types.DeviceTypeHID, report)
 	_, err = m.device.Write(report)
+	if err == nil && debugFrameMutatesDevice(frame) {
+		// 调试命令绕过了正常的设置路径，设备状态可能已和"减少闪存擦写"用的缓存不一致
+		// （例如 06 恢复出厂挡位转速、46 00 关灯），之后的正常写入会被当成重复而跳过。
+		// 与固件维护命令一样，清空缓存让下一次写入完整下发。
+		m.resetRealtimeControlStateLocked()
+		m.resetLightStateCacheLocked()
+		m.resetGearRPMCacheLocked()
+	}
 	m.mutex.Unlock()
 	if err != nil {
 		return types.DeviceDebugCommandResult{}, err

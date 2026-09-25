@@ -2,6 +2,8 @@ package device
 
 import (
 	"testing"
+
+	"github.com/TIANLI0/THRM/internal/deviceproto"
 )
 
 type testLogger struct{}
@@ -114,5 +116,29 @@ func TestDebugCaptureSkipsBackgroundFrameWork(t *testing.T) {
 	}
 	if frames := m.GetDebugFrames(); len(frames) != 1 {
 		t.Fatalf("captured %d frames with capture enabled, want 1", len(frames))
+	}
+}
+
+func TestDebugFrameMutatesDevice(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"06", true},    // 恢复出厂挡位转速
+		{"46 00", true}, // 关闭 RGB
+		{"48 00", true}, // 关闭挡位灯
+		{"21 dc 05", true},
+		{"27", false}, // 查询挡位转速表
+		{"22", false}, // 查询转速状态
+		{"01", false}, // 查询固件版本
+	}
+	for _, tc := range cases {
+		frame, err := deviceproto.NormalizeDebugInput(tc.input)
+		if err != nil {
+			t.Fatalf("NormalizeDebugInput(%q): %v", tc.input, err)
+		}
+		if got := debugFrameMutatesDevice(frame); got != tc.want {
+			t.Fatalf("debugFrameMutatesDevice(%q) = %v, want %v", tc.input, got, tc.want)
+		}
 	}
 }

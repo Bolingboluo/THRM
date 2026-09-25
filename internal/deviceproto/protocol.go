@@ -181,6 +181,14 @@ func ValidateOutboundFrame(frame []byte) error {
 		if len(parsed.Payload) >= 1 && parsed.Payload[0] > 3 {
 			return fmt.Errorf("命令 0x26 的挡位索引 %d 超出 0..3", parsed.Payload[0])
 		}
+	case CmdSetFixedGear:
+		// 固件的 0x08 分支不校验 payload，任何字节都会被直接写进当前挡位字段。
+		if len(parsed.Payload) < 1 {
+			return fmt.Errorf("命令 0x08 需要挡位号")
+		}
+		if parsed.Payload[0] < 1 || parsed.Payload[0] > 4 {
+			return fmt.Errorf("命令 0x08 的挡位号 %d 超出 1..4，固件不做校验，会被直接写进当前挡位字段", parsed.Payload[0])
+		}
 	}
 	return nil
 }
@@ -193,24 +201,22 @@ func ParseHex(input string) ([]byte, error) {
 		return r
 	}, strings.TrimSpace(input))
 
-	fields := strings.Fields(normalized)
-	var cleaned string
-	if len(fields) <= 1 {
-		cleaned = normalized
-	} else {
-		var b strings.Builder
-		for _, field := range fields {
-			b.WriteString(strings.TrimPrefix(strings.TrimPrefix(field, "0x"), "0X"))
+	// 奇数位只能按字段逐个补齐：先拼接再整体补 0 会让一个单数字字段把后面
+	// 每个字节都错开半个字节（"0C 1" 变成 00 C1），发出去就是另一条命令。
+	// 单个数字当作一个字节的简写；更长的奇数位字段分不清字节边界，直接拒绝。
+	var b strings.Builder
+	for _, field := range strings.Fields(normalized) {
+		field = strings.ReplaceAll(field, "0x", "")
+		field = strings.ReplaceAll(field, "0X", "")
+		switch {
+		case len(field) == 1:
+			b.WriteByte('0')
+		case len(field)%2 != 0:
+			return nil, fmt.Errorf("invalid hex command: field %q has an odd number of digits", field)
 		}
-		cleaned = b.String()
+		b.WriteString(field)
 	}
-	cleaned = strings.ReplaceAll(cleaned, "0x", "")
-	cleaned = strings.ReplaceAll(cleaned, "0X", "")
-	cleaned = strings.ReplaceAll(cleaned, " ", "")
-	if len(cleaned)%2 != 0 {
-		cleaned = "0" + cleaned
-	}
-	data, err := hex.DecodeString(cleaned)
+	data, err := hex.DecodeString(b.String())
 	if err != nil {
 		return nil, fmt.Errorf("invalid hex command: %w", err)
 	}
