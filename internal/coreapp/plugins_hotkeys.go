@@ -171,9 +171,15 @@ func (a *CoreApp) applyLegionFnQFanMapping(state fnqpowermode.PowerModeState) {
 	}
 
 	if cfg.AutoControl || cfg.CustomSpeedEnabled {
-		cfg.AutoControl = false
-		cfg.CustomSpeedEnabled = false
-		a.configManager.Set(cfg)
+		// 只改这两个开关，不回写上面取到的整份快照。
+		a.mutex.Lock()
+		cfg, _ = a.configManager.Mutate(func(cur *types.AppConfig) bool {
+			changed := cur.AutoControl || cur.CustomSpeedEnabled
+			cur.AutoControl = false
+			cur.CustomSpeedEnabled = false
+			return changed
+		})
+		a.mutex.Unlock()
 		if err := a.configManager.Save(); err != nil {
 			a.logError("failed to save Lenovo Legion Fn+Q takeover config: %v", err)
 		}

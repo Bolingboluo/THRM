@@ -28,25 +28,27 @@ func normalizeFanFeatureConfig(cfg *types.AppConfig) bool {
 	return changed
 }
 
-func (a *CoreApp) applyTimeCurveSchedule(now time.Time) {
-	cfg := a.configManager.Get()
+// applyTimeCurveSchedule 按分时规则切换曲线方案，cfg 为调用方刚取到的配置快照。
+// 返回 true 表示已切换，调用方需要重新取快照。
+func (a *CoreApp) applyTimeCurveSchedule(cfg types.AppConfig, now time.Time) bool {
 	if !cfg.TimeCurveSchedule.Enabled || len(cfg.TimeCurveSchedule.Rules) == 0 {
-		return
+		return false
 	}
 
 	rule := findMatchingTimeCurveScheduleRule(cfg.TimeCurveSchedule, now)
 	if rule == nil {
-		return
+		return false
 	}
 	if strings.TrimSpace(rule.CurveProfileID) == "" || rule.CurveProfileID == cfg.ActiveFanCurveProfileID {
-		return
+		return false
 	}
 
 	if _, err := a.SetActiveFanCurveProfile(rule.CurveProfileID); err != nil {
 		a.logError("分时曲线切换失败[%s -> %s]: %v", rule.Name, rule.CurveProfileID, err)
-		return
+		return false
 	}
 	a.logInfo("分时曲线已生效: %s -> %s", rule.Name, rule.CurveProfileID)
+	return true
 }
 
 func findMatchingTimeCurveScheduleRule(schedule types.TimeCurveScheduleConfig, now time.Time) *types.TimeCurveScheduleRule {

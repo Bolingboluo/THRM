@@ -11,6 +11,22 @@ func cloneIntSlice(input []int) []int {
 	return out
 }
 
+// preserveLearnedState 用核心当前的学习结果覆盖 dst 中对应字段（dst 通常来自 GUI）。
+func preserveLearnedState(dst *types.SmartControlConfig, current types.SmartControlConfig) {
+	dst.LearnedOffsets = cloneIntSlice(current.LearnedOffsets)
+	dst.LearnedOffsetsHeat = cloneIntSlice(current.LearnedOffsetsHeat)
+	dst.LearnedOffsetsCool = cloneIntSlice(current.LearnedOffsetsCool)
+	dst.LearnedRateHeat = cloneIntSlice(current.LearnedRateHeat)
+	dst.LearnedRateCool = cloneIntSlice(current.LearnedRateCool)
+	dst.LearnedOffsetsByProfile = nil
+	if current.LearnedOffsetsByProfile != nil {
+		dst.LearnedOffsetsByProfile = make(map[string][]int, len(current.LearnedOffsetsByProfile))
+		for id, offsets := range current.LearnedOffsetsByProfile {
+			dst.LearnedOffsetsByProfile[id] = cloneIntSlice(offsets)
+		}
+	}
+}
+
 func syncSmartControlOffsetsForActiveProfile(cfg *types.AppConfig) bool {
 	if cfg == nil {
 		return false

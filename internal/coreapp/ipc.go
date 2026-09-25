@@ -377,6 +377,8 @@ func (a *CoreApp) handleIPCRequest(req ipc.Request) ipc.Response {
 		if err := a.autostartManager.SetAutoStartWithMethod(params.Enable, params.Method); err != nil {
 			return a.errorResponse(err.Error())
 		}
+		// 只改系统自启动项而不落盘的话，下一次配置广播会把 GUI 上的开关打回去。
+		a.persistWindowsAutoStart(params.Enable)
 		return a.successResponse(true)
 
 	// 窗口相关

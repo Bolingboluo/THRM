@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -298,6 +299,9 @@ func (a *CoreApp) startTemperatureMonitoring() {
 
 	// 每个曲线点对应一个稳态采样桶。
 	steadyObserver := smartcontrol.NewStableObserver(len(cfg.FanCurve))
+	// 观测器里的分桶样本与效率历史只对学到它们的那条曲线有意义。
+	observerProfileID := cfg.ActiveFanCurveProfileID
+	observerCurve := slices.Clone(cfg.FanCurve)
 	timer := time.NewTimer(updateInterval)
 	defer timer.Stop()
 	// 只统计"定时器等待"期间流逝的时间，不把本轮采样/控温的耗时算进去。
@@ -342,7 +346,10 @@ monitorLoop:
 			}
 
 			cfg, cfgRevision = a.configManager.GetWithRevision()
-			a.applyTimeCurveSchedule(now)
+			if a.applyTimeCurveSchedule(cfg, now) {
+				// 刚切换了曲线方案：重取快照，本周期就按新曲线控温，后面也不会拿旧快照回写。
+				cfg, cfgRevision = a.configManager.GetWithRevision()
+			}
 			// 后台空闲（无 GUI 连接且未开启智能控温）时放慢采样：此时温度读取不驱动风扇，
 			// 仅服务托盘提示与历史记录，降低采样频率可显著减少桥接传感器扫描带来的后台 CPU 占用。
 			hasClients = a.ipcServer != nil && a.ipcServer.HasClients()
@@ -438,9 +445,18 @@ monitorLoop:
 				smartCfgRevision = cfgRevision
 				if smartChanged {
 					cfg.SmartControl = smartCfg
-					a.configManager.Set(cfg)
-					if err := a.configManager.Save(); err != nil {
-						a.logError("保存智能控温配置失败: %v", err)
+					// 只改写智能控温段，并以最新配置为准重新归一化，不回写本周期开头的整份快照。
+					_, persisted := a.configManager.Mutate(func(cur *types.AppConfig) bool {
+						next, changed := smartcontrol.NormalizeConfig(cur.SmartControl, cur.FanCurve, cur.DebugMode)
+						if changed {
+							cur.SmartControl = next
+						}
+						return changed
+					})
+					if persisted {
+						if err := a.configManager.Save(); err != nil {
+							a.logError("保存智能控温配置失败: %v", err)
+						}
 					}
 				}
 			}
@@ -484,8 +500,11 @@ monitorLoop:
 					tempEMAReady = false
 				}
 
-				if steadyObserver == nil || len(cfg.FanCurve) != steadyObserver.CurveLen() {
+				// 切换方案或编辑曲线后点数通常不变，只比较点数会让新曲线沿用旧曲线的样本与效率历史。
+				if steadyObserver == nil || cfg.ActiveFanCurveProfileID != observerProfileID || !slices.Equal(cfg.FanCurve, observerCurve) {
 					steadyObserver = smartcontrol.NewStableObserver(len(cfg.FanCurve))
+					observerProfileID = cfg.ActiveFanCurveProfileID
+					observerCurve = slices.Clone(cfg.FanCurve)
 				}
 
 				activeCurve := cfg.FanCurve
@@ -591,9 +610,20 @@ monitorLoop:
 							if changed {
 								smartCfg.LearnedOffsets = newOffsets
 								cfg.SmartControl = smartCfg
-								storeSmartControlOffsetsForActiveProfile(&cfg)
-								a.configManager.Set(cfg)
-								learningDirty = true
+								// 只合并学习偏移。期间若切换了方案或改了曲线，这批偏移是按旧曲线学的，丢弃。
+								learnedProfileID := cfg.ActiveFanCurveProfileID
+								learnedCurve := cfg.FanCurve
+								_, merged := a.configManager.Mutate(func(cur *types.AppConfig) bool {
+									if cur.ActiveFanCurveProfileID != learnedProfileID || !slices.Equal(cur.FanCurve, learnedCurve) {
+										return false
+									}
+									cur.SmartControl.LearnedOffsets = cloneIntSlice(newOffsets)
+									storeSmartControlOffsetsForActiveProfile(cur)
+									return true
+								})
+								if merged {
+									learningDirty = true
+								}
 							}
 						}
 					}
@@ -610,7 +640,7 @@ monitorLoop:
 						lastLearningSave = time.Now()
 						learningDirty = false
 						if a.ipcServer != nil {
-							a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, cfg)
+							a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, a.configManager.Get())
 						}
 					}
 				}

@@ -63,10 +63,10 @@ func (a *CoreApp) UpdateConfig(cfg types.AppConfig) error {
 	// 保留时长由专用接口独占维护，以记录器的实际状态为准：GUI 手上的配置副本可能还是
 	// 改动之前的值，采信入参会让"改完保留时长后又动了别的设置"把用户的选择静默回退。
 	cfg.TemperatureHistoryRetentionHours = a.historyRetentionHours(oldCfg)
+	// 学习结果由核心的控温循环独占维护：GUI 手上的配置副本最多每 25 秒才同步一次，
+	// 采信入参会让任意一次设置改动把这段时间学到的偏移静默回退。清空走 ResetLearnedOffsets。
+	preserveLearnedState(&cfg.SmartControl, oldCfg.SmartControl)
 	// 前端模型可能未携带按曲线方案记忆的映射字段，避免整表被清空
-	if cfg.SmartControl.LearnedOffsetsByProfile == nil {
-		cfg.SmartControl.LearnedOffsetsByProfile = oldCfg.SmartControl.LearnedOffsetsByProfile
-	}
 	if cfg.SmartControl.TargetTempByProfile == nil {
 		cfg.SmartControl.TargetTempByProfile = oldCfg.SmartControl.TargetTempByProfile
 	}
@@ -573,16 +573,29 @@ func normalizeLightStripConfig(cfg types.LightStripConfig) (types.LightStripConf
 func (a *CoreApp) SetWindowsAutoStart(enable bool) error {
 	err := a.autostartManager.SetWindowsAutoStart(enable)
 	if err == nil {
-		cfg := a.configManager.Get()
-		cfg.WindowsAutoStart = enable
-		a.configManager.Update(cfg)
-
-		// 广播配置更新
-		if a.ipcServer != nil {
-			a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, cfg)
-		}
+		a.persistWindowsAutoStart(enable)
 	}
 	return err
+}
+
+// persistWindowsAutoStart 记录自启动开关并广播。只改这一个字段，不回写整份旧快照。
+func (a *CoreApp) persistWindowsAutoStart(enable bool) {
+	cfg, changed := a.configManager.Mutate(func(cfg *types.AppConfig) bool {
+		if cfg.WindowsAutoStart == enable {
+			return false
+		}
+		cfg.WindowsAutoStart = enable
+		return true
+	})
+	if !changed {
+		return
+	}
+	if err := a.configManager.Save(); err != nil {
+		a.logError("保存自启动配置失败: %v", err)
+	}
+	if a.ipcServer != nil {
+		a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, cfg)
+	}
 }
 
 // GetDebugInfo 获取调试信息

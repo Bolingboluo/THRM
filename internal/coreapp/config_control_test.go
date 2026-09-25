@@ -2,6 +2,7 @@ package coreapp
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/TIANLI0/THRM/internal/config"
@@ -117,5 +118,47 @@ func TestRuntimeDebugInfo_ContainsKeys(t *testing.T) {
 		if _, ok := info[key]; !ok {
 			t.Fatalf("runtimeDebugInfo should contain key %q", key)
 		}
+	}
+}
+
+// UpdateConfig 不得采信 GUI 副本里的学习偏移：GUI 最多每 25 秒才收到一次学习结果，
+// 期间任意一次设置改动都会把核心刚学到的偏移静默回退。
+func TestUpdateConfigKeepsCoreLearnedOffsets(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	app := &CoreApp{configManager: config.NewManager(tmpDir, nil)}
+	coreCfg := types.GetDefaultConfig(false)
+	learned := make([]int, len(coreCfg.FanCurve))
+	// 只在低转速段设偏移：高转速点会被 NormalizeConfig 按转速上限裁掉。
+	for i := range len(learned) / 2 {
+		learned[i] = 50
+	}
+	coreCfg.SmartControl.LearnedOffsets = learned
+	if err := app.UpdateConfig(coreCfg); err != nil {
+		t.Fatalf("seed UpdateConfig failed: %v", err)
+	}
+	// UpdateConfig 本身就会保留核心侧的值，这里直接写入核心学到的结果。
+	app.configManager.Mutate(func(cfg *types.AppConfig) bool {
+		cfg.SmartControl.LearnedOffsets = slices.Clone(learned)
+		storeSmartControlOffsetsForActiveProfile(cfg)
+		return true
+	})
+
+	staleGUI := types.GetDefaultConfig(false)
+	staleGUI.SmartControl.LearnedOffsets = make([]int, len(staleGUI.FanCurve))
+	staleGUI.SmartControl.LearnedOffsetsByProfile = map[string][]int{}
+	staleGUI.AutoControl = !coreCfg.AutoControl
+	if err := app.UpdateConfig(staleGUI); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+
+	got := app.configManager.Get()
+	if got.AutoControl != staleGUI.AutoControl {
+		t.Fatal("普通设置应正常生效")
+	}
+	if !slices.Equal(got.SmartControl.LearnedOffsets, learned) {
+		t.Fatalf("学习偏移被 GUI 副本回退: %v", got.SmartControl.LearnedOffsets)
 	}
 }
