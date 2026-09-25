@@ -645,6 +645,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   const rtssInteractionActiveRef = useRef(false);
   const latestConfigRef = useRef(config);
   const onConfigChangeRef = useRef(onConfigChange);
+  const cpuSensorsSavingRef = useRef(false);
   const [debugCommandInput, setDebugCommandInput] = useState('27');
   const [debugCommandResult, setDebugCommandResult] = useState<DeviceDebugCommandResult | null>(null);
   const [debugCommandLoading, setDebugCommandLoading] = useState(false);
@@ -1129,12 +1130,17 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   }, [config, onConfigChange]);
 
   const handleCpuSensorsChange = useCallback(async (keys: string[]) => {
+    // 多选下拉在保存期间仍然展开可点，而 keys 是按尚未更新的旧选择算出来的；
+    // 放任第二次点击会覆盖掉第一次的选择，所以保存完成前忽略新的点击。
+    if (cpuSensorsSavingRef.current) return;
+    cpuSensorsSavingRef.current = true;
     setLoading('cpuSensors', true);
     try {
       const newCfg = types.AppConfig.createFrom({ ...config, cpuSensors: keys });
       await apiService.updateConfig(newCfg);
       onConfigChange(newCfg);
     } catch { /* noop */ } finally {
+      cpuSensorsSavingRef.current = false;
       setLoading('cpuSensors', false);
     }
   }, [config, onConfigChange]);
@@ -1608,7 +1614,10 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
 
   // GUI 存活上报统一由 useAppBootstrap 负责，此处不再重复发送。
   useEffect(() => { loadCurveProfiles(); }, [loadCurveProfiles]);
-  useEffect(() => { setLightStripConfig(normalizeLightStripConfig(config)); }, [config]);
+  // 只在灯效配置本身变化时重置草稿：学习模式定期保存、其它设置开关都会广播整份配置，
+  // 依赖整个 config 会把用户还没点"应用"的灯效改动冲掉。
+  const lightStripConfigKey = useMemo(() => JSON.stringify((config as any).lightStrip ?? null), [config]);
+  useEffect(() => { setLightStripConfig(normalizeLightStripConfig(config)); }, [lightStripConfigKey]);
   useEffect(() => {
     setManualHotkeyInput(normalizeHotkeyForDisplay((config as any).manualGearToggleHotkey));
     setAutoHotkeyInput(normalizeHotkeyForDisplay((config as any).autoControlToggleHotkey));
@@ -1809,12 +1818,16 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     }
   }, []);
 
-  const saveHotkeys = useCallback(async (silent = false) => {
+  // overrides 用于"刚 setState 就立即保存"的场景：此时闭包里的输入框状态还是上一次渲染的旧值。
+  const saveHotkeys = useCallback(async (
+    silent = false,
+    overrides: { manual?: string; auto?: string; curve?: string } = {},
+  ) => {
     setLoading('hotkeys', true);
     try {
-      const manualValue = normalizeHotkeyForDisplay(manualHotkeyInput);
-      const autoValue = normalizeHotkeyForDisplay(autoHotkeyInput);
-      const curveValue = normalizeHotkeyForDisplay(curveProfileHotkeyInput);
+      const manualValue = normalizeHotkeyForDisplay(overrides.manual ?? manualHotkeyInput);
+      const autoValue = normalizeHotkeyForDisplay(overrides.auto ?? autoHotkeyInput);
+      const curveValue = normalizeHotkeyForDisplay(overrides.curve ?? curveProfileHotkeyInput);
 
       const nonEmptyValues = [manualValue, autoValue, curveValue].filter((value) => value !== '');
       const uniq = new Set(nonEmptyValues);
@@ -1875,7 +1888,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     if (target === 'manual') setManualHotkeyInput('');
     else if (target === 'auto') setAutoHotkeyInput('');
     else setCurveProfileHotkeyInput('');
-    await saveHotkeys(true);
+    await saveHotkeys(true, { [target]: '' });
   }, [saveHotkeys]);
 
   return (
