@@ -517,7 +517,9 @@ func (a *CoreApp) broadcastSmartLightStatus() {
 	}
 	status := a.GetSmartLightStatus()
 	a.mutex.Lock()
-	unchanged := a.lastSmartLightStatus == status
+	// 不比较 Temperature：它每个采样周期都在变，整体比较等于每周期都广播一次。
+	last := a.lastSmartLightStatus
+	unchanged := last.Active == status.Active && last.BandIndex == status.BandIndex && last.Preset == status.Preset
 	a.lastSmartLightStatus = status
 	a.mutex.Unlock()
 	if unchanged {
