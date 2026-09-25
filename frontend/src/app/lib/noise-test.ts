@@ -88,9 +88,13 @@ export class NoiseMeter {
   private analyser: AnalyserNode | null = null;
   private freqData: Float32Array | null = null;
   private binWeights: Float64Array | null = null;
+  // close() 每次递增。open() 在等待 getUserMedia 期间若被 close() 或新的 open() 打断，
+  // 拿到的流就作废并立即停掉，否则麦克风会一直开着，或旧流被覆盖后再也没人停。
+  private generation = 0;
 
   async open(deviceId?: string): Promise<void> {
     this.close();
+    const generation = this.generation;
     const constraints: MediaStreamConstraints = {
       audio: {
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
@@ -100,6 +104,10 @@ export class NoiseMeter {
       },
     };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (generation !== this.generation) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
     const context = new AudioContext();
     const source = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
@@ -120,7 +128,12 @@ export class NoiseMeter {
     this.freqData = new Float32Array(analyser.frequencyBinCount);
     this.binWeights = weights;
     if (context.state === 'suspended') {
-      await context.resume();
+      try {
+        await context.resume();
+      } catch (err) {
+        // resume 期间被 close() 关掉的上下文会抛 InvalidStateError，此时资源已由 close() 释放
+        if (generation === this.generation) throw err;
+      }
     }
   }
 
@@ -160,6 +173,7 @@ export class NoiseMeter {
   }
 
   close(): void {
+    this.generation += 1;
     this.stream?.getTracks().forEach((track) => track.stop());
     void this.context?.close().catch(() => undefined);
     this.stream = null;

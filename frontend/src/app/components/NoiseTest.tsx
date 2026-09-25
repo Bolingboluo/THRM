@@ -73,6 +73,8 @@ const NoiseTest = function NoiseTest({ open, onOpenChange, config, onConfigChang
   const meterRef = useRef<NoiseMeter | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const recentLevelsRef = useRef<number[]>([]);
+  // 每次打开麦克风或清理时递增，异步返回时据此丢弃已经过期的结果。
+  const openSeqRef = useRef(0);
   const phaseRef = useRef<Phase>('intro');
   phaseRef.current = phase;
 
@@ -80,6 +82,7 @@ const NoiseTest = function NoiseTest({ open, onOpenChange, config, onConfigChang
   const envStable = envRangeDb <= ENV_STABLE_RANGE_DB;
 
   const cleanupMeter = useCallback(() => {
+    openSeqRef.current += 1;
     meterRef.current?.close();
     meterRef.current = null;
     recentLevelsRef.current = [];
@@ -103,24 +106,32 @@ const NoiseTest = function NoiseTest({ open, onOpenChange, config, onConfigChang
   /* ── 麦克风打开与实时电平 ── */
 
   const openMeter = useCallback(async (deviceId: string) => {
+    const seq = ++openSeqRef.current;
     setMicError(null);
     setMeterReady(false);
     try {
       if (!meterRef.current) meterRef.current = new NoiseMeter();
-      await meterRef.current.open(deviceId || undefined);
+      const meter = meterRef.current;
+      await meter.open(deviceId || undefined);
+      // 等待期间对话框已关闭（meter 被清理）或又切换了麦克风：本次结果作废
+      if (seq !== openSeqRef.current || meterRef.current !== meter || !meter.isOpen) return;
       recentLevelsRef.current = [];
       setMeterReady(true);
     } catch (err) {
+      if (seq !== openSeqRef.current) return;
       setMicError(getErrorMessage(err));
     }
   }, []);
 
   const loadMics = useCallback(async () => {
+    const seq = openSeqRef.current;
     setMicLoading(true);
     setMicError(null);
     try {
       const list = await listMicrophones();
       setMics(list);
+      // 枚举（含权限弹窗）期间对话框已关闭或用户已手动选了麦克风：不再自动打开
+      if (seq !== openSeqRef.current) return;
       const preferred = list.find((m) => m.deviceId === selectedMic) ?? list[0];
       if (preferred) {
         setSelectedMic(preferred.deviceId);
