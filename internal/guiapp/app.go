@@ -25,6 +25,11 @@ type App struct {
 	// 否则 QuitAll 让核心退出后，看护协程会把它当成"核心掉线"重新拉起来。
 	shuttingDown atomic.Bool
 
+	// coreServiceOK 记录上一次通知前端的核心服务状态，core-service-ok 只在
+	// "未知/异常 → 正常"跳变时发送。锁同时保证状态与发出的事件顺序一致。
+	coreStatusMutex sync.Mutex
+	coreServiceOK   bool
+
 	// 缓存的状态
 	isConnected bool
 	currentTemp types.TemperatureData

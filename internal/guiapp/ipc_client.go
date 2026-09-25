@@ -123,14 +123,43 @@ func (a *App) emitCoreServiceError(detail string) {
 	if a.ctx == nil {
 		return
 	}
+	a.coreStatusMutex.Lock()
+	defer a.coreStatusMutex.Unlock()
+	a.coreServiceOK = false
 	runtime.EventsEmit(a.ctx, "core-service-error", coreServiceUnavailableMessage(detail))
 }
 
+// emitCoreServiceOK 只在状态跳变（启动后首次成功、从异常恢复）时通知前端。
+// 前端只关心这次跳变（据此重新同步），此前每个成功请求都发一次，
+// 白白给 webview 灌了大量无用事件。
 func (a *App) emitCoreServiceOK() {
 	if a.ctx == nil {
 		return
 	}
+	a.coreStatusMutex.Lock()
+	defer a.coreStatusMutex.Unlock()
+	if !a.markCoreServiceOKLocked() {
+		return
+	}
 	runtime.EventsEmit(a.ctx, "core-service-ok", nil)
+}
+
+// markCoreServiceOKLocked 把状态置为正常，返回这是否是一次跳变。调用方须持有 coreStatusMutex。
+func (a *App) markCoreServiceOKLocked() bool {
+	if a.coreServiceOK {
+		return false
+	}
+	a.coreServiceOK = true
+	return true
+}
+
+// markCoreServiceDegraded 记录一次未通知前端的请求失败（如未达重连阈值的超时）。
+// 前端可能已从被拒绝的 Promise 自行推断出核心异常，下一次成功必须再发 core-service-ok
+// 让它恢复，否则会一直停在错误态。
+func (a *App) markCoreServiceDegraded() {
+	a.coreStatusMutex.Lock()
+	a.coreServiceOK = false
+	a.coreStatusMutex.Unlock()
 }
 
 // handleCoreEvent 处理核心服务推送的事件
@@ -149,11 +178,7 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 	case ipc.EventTemperatureUpdate:
 		var temp types.TemperatureData
 		if err := json.Unmarshal(event.Data, &temp); err == nil {
-			a.mutex.Lock()
-			temp = mergeTemperatureMetadata(a.currentTemp, temp)
-			a.currentTemp = temp
-			a.mutex.Unlock()
-			runtime.EventsEmit(a.ctx, "temperature-update", temp)
+			runtime.EventsEmit(a.ctx, "temperature-update", a.mergeCurrentTemp(temp))
 		}
 
 	case ipc.EventTemperatureHistoryUpdate:
@@ -169,7 +194,9 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 		}
 
 	case ipc.EventDeviceConnected:
-		var deviceInfo map[string]string
+		// 载荷里除了字符串字段还嵌着 deviceSettings 对象，按 map[string]string 解码
+		// 会整体失败，前端每次连接都拿不到设备设置。
+		var deviceInfo map[string]any
 		json.Unmarshal(event.Data, &deviceInfo)
 		a.mutex.Lock()
 		a.isConnected = true
@@ -226,7 +253,23 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 
 	case "quit":
 		a.QuitApp()
+
+	default:
+		// 其余事件（device-settings-update、legion-fnq-support-update、flydigi-compat-update 等）
+		// 由前端直接消费，GUI 无需解读，原样转发。此前这里漏掉的事件会被静默丢弃，
+		// 核心新增事件时也不必再同步修改 GUI。
+		runtime.EventsEmit(a.ctx, event.Type, event.Data)
 	}
+}
+
+// mergeCurrentTemp 把新到的温度数据并入缓存并返回合并结果。
+// 核心推送的温度事件会省略未变化的传感器清单，缓存必须先由完整快照
+// （GetTemperature / GetDeviceStatus）播种，否则前端会拿到被清空的清单。
+func (a *App) mergeCurrentTemp(temp types.TemperatureData) types.TemperatureData {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.currentTemp = mergeTemperatureMetadata(a.currentTemp, temp)
+	return a.currentTemp
 }
 
 // sendRequest 发送请求到核心服务
@@ -266,6 +309,7 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 	if !shouldReconnectAfterIPCError(err, timeoutCount) {
 		guiLogger.Warnf("IPC 请求超时，保留当前连接等待恢复（%d/%d）: %v",
 			timeoutCount, ipcTimeoutReconnectThreshold, err)
+		a.markCoreServiceDegraded()
 		return nil, err
 	}
 	a.resetIPCTimeouts()

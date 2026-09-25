@@ -47,6 +47,14 @@ func (a *App) GetDeviceStatus() map[string]any {
 	}
 	var status map[string]any
 	json.Unmarshal(resp.Data, &status)
+	// 前端启动/重同步时从这里取温度，它里面是完整快照，同样用来播种温度缓存，
+	// 见 GetTemperature。
+	var snapshot struct {
+		Temperature *types.TemperatureData `json:"temperature"`
+	}
+	if err := json.Unmarshal(resp.Data, &snapshot); err == nil && snapshot.Temperature != nil {
+		a.mergeCurrentTemp(*snapshot.Temperature)
+	}
 	return status
 }
 
