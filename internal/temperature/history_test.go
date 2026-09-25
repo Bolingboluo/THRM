@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -250,5 +253,161 @@ func TestHistoryRecorderPrunesEventsOutsideRetention(t *testing.T) {
 	}
 	if recorder.events[0].LabelKey != types.TimelineKeyDeviceConnected {
 		t.Fatalf("pruned the wrong event: %+v", recorder.events[0])
+	}
+}
+
+// 文件里的点数直接决定 make 的容量。损坏的点数曾让启动时申请上百 GB 内存，
+// 这种 OOM 无法 recover，每次启动都会崩。点数必须先按剩余字节数校验。
+func TestHistoryRecorderRejectsCorruptedPointCount(t *testing.T) {
+	recorder := NewHistoryRecorder("", 8, 5*time.Second, nil)
+
+	header := func(version uint16, count uint32) []byte {
+		data := append([]byte{}, historyBinaryMagic...)
+		data = binary.LittleEndian.AppendUint16(data, version)
+		data = append(data, historyEnabledFlag, 0)
+		data = binary.LittleEndian.AppendUint32(data, 5)
+		data = binary.LittleEndian.AppendUint32(data, count)
+		return binary.LittleEndian.AppendUint64(data, uint64(1_717_000_000_000))
+	}
+
+	if err := recorder.loadBinaryData(header(historyBinaryVersion, 0xFFFFFFFF)); err == nil {
+		t.Fatal("expected a corrupted point count to be rejected")
+	}
+	// v1 每点 20 字节：声明 2 个点却只有 1 个点的数据。
+	short := header(historyBinaryVersionLegacy, 2)
+	short = append(short, make([]byte, 20)...)
+	if err := recorder.loadBinaryData(short); err == nil {
+		t.Fatal("expected a point count larger than the payload to be rejected")
+	}
+}
+
+// 系统时钟回拨后新样本早于最新记录。负的间隔曾被当成"太快"丢弃，记录会一直停到
+// 墙钟重新追上旧的最新时间为止；现在要丢掉落在"未来"的点和事件，接着记录。
+func TestHistoryRecorderRecoversFromClockRollback(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	enableRecorderForTest(t, recorder)
+
+	now := time.Now().UnixMilli()
+	future := now + 2*time.Hour.Milliseconds() // 回拨前的时钟
+	for i := range 3 {
+		if _, ok := recorder.Add(types.TemperatureData{CPUTemp: 60 + i, UpdateTime: future + int64(i)*5_000}, nil); !ok {
+			t.Fatalf("expected pre-rollback sample %d to be recorded", i)
+		}
+	}
+	recorder.mutex.Lock()
+	recorder.events = []types.TimelineEvent{
+		{Timestamp: now - 10_000, Type: types.TimelineEventTypeMode, LabelKey: types.TimelineKeyCoreStarted},
+		{Timestamp: future, Type: types.TimelineEventTypeMode, LabelKey: types.TimelineKeyDeviceConnected},
+	}
+	recorder.mutex.Unlock()
+
+	if _, ok := recorder.Add(types.TemperatureData{CPUTemp: 70, UpdateTime: now}, nil); !ok {
+		t.Fatal("expected a sample after the clock moved back to be recorded")
+	}
+	if _, ok := recorder.Add(types.TemperatureData{CPUTemp: 71, UpdateTime: now + 5_000}, nil); !ok {
+		t.Fatal("expected recording to continue after the clock rollback")
+	}
+
+	snapshot := recorder.Snapshot()
+	if got := len(snapshot.Points); got != 2 {
+		t.Fatalf("expected only the 2 post-rollback points, got %d", got)
+	}
+	if !slices.IsSortedFunc(snapshot.Points, func(a, b types.TemperatureHistoryPoint) int {
+		return int(a.Timestamp - b.Timestamp)
+	}) || snapshot.Points[0].Timestamp != now {
+		t.Fatalf("points must stay in ascending order starting at %d: %+v", now, snapshot.Points)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].LabelKey != types.TimelineKeyCoreStarted {
+		t.Fatalf("expected the future event to be discarded, got %+v", snapshot.Events)
+	}
+}
+
+// 一次过期读数也会早于最新记录，但墙钟并没有回拨：不能因此丢掉已有的点。
+func TestHistoryRecorderStaleSampleDoesNotDiscardHistory(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	enableRecorderForTest(t, recorder)
+
+	now := time.Now().UnixMilli()
+	if _, ok := recorder.Add(types.TemperatureData{CPUTemp: 60, UpdateTime: now}, nil); !ok {
+		t.Fatal("expected first sample to be recorded")
+	}
+	if _, ok := recorder.Add(types.TemperatureData{CPUTemp: 61, UpdateTime: now - 10*time.Minute.Milliseconds()}, nil); ok {
+		t.Fatal("expected a stale sample to be skipped")
+	}
+	if points := recorder.Snapshot().Points; len(points) != 1 || points[0].Timestamp != now {
+		t.Fatalf("stale sample must not discard history, got %+v", points)
+	}
+}
+
+// 序列化在 mutex 下、写盘在 flushMutex 下，更早序列化的快照可能后写到盘上。
+// 典型场景：一次在途的 Add 带着启用态的旧快照，落在 SetEnabled(false) 清空之后。
+func TestHistoryRecorderDropsStalePayload(t *testing.T) {
+	t.Parallel()
+
+	filePath := filepath.Join(t.TempDir(), "history.bin")
+	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	enableRecorderForTest(t, recorder)
+	_, _ = recorder.Add(types.TemperatureData{CPUTemp: 60, UpdateTime: 1_717_000_000}, nil)
+
+	recorder.mutex.Lock()
+	stale, err := recorder.serializeLocked()
+	recorder.mutex.Unlock()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	if err := recorder.SetEnabled(false); err != nil {
+		t.Fatalf("disable recorder: %v", err)
+	}
+	if err := recorder.writeFile(stale); err != nil {
+		t.Fatalf("write stale payload: %v", err)
+	}
+
+	reloaded := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	if reloaded.IsEnabled() || len(reloaded.Snapshot().Points) != 0 {
+		t.Fatal("an older snapshot overwrote the newer disabled state on disk")
+	}
+}
+
+// Flush 会被接进核心退出流程，与采样循环里的 Add 并发；结束后盘上必须是最新状态。
+func TestHistoryRecorderFlushConcurrentWithAdd(t *testing.T) {
+	t.Parallel()
+
+	filePath := filepath.Join(t.TempDir(), "history.bin")
+	recorder := NewHistoryRecorder(filePath, 64, time.Second, nil)
+	enableRecorderForTest(t, recorder)
+
+	var clock atomic.Int64
+	clock.Store(1_717_000_000_000)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_, _ = recorder.Add(types.TemperatureData{CPUTemp: 60, UpdateTime: clock.Add(1_000)}, nil)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				if err := recorder.Flush(); err != nil {
+					t.Errorf("Flush: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := recorder.Flush(); err != nil {
+		t.Fatalf("final Flush: %v", err)
+	}
+
+	want := recorder.Snapshot().Points
+	got := NewHistoryRecorder(filePath, 64, time.Second, nil).Snapshot().Points
+	if !slices.Equal(got, want) {
+		t.Fatalf("disk has %d points, memory has %d: an older snapshot landed last", len(got), len(want))
 	}
 }

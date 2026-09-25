@@ -37,6 +37,9 @@ const (
 	// 同类事件在此窗口内重复到达视为同一次（例如 Windows 唤醒会同时发出
 	// PBT_APMRESUMESUSPEND 与 PBT_APMRESUMEAUTOMATIC 两个通知）。
 	timelineEventDedupeWindow = 3 * time.Second
+
+	// 新样本比最新记录早超过该值、且墙钟本身也早于最新记录时，视为系统时钟回拨。
+	historyClockRollbackTolerance = time.Minute
 )
 
 type HistoryRecorder struct {
@@ -57,7 +60,16 @@ type HistoryRecorder struct {
 
 	dirtyCount  int
 	lastFlushAt time.Time
+	payloadSeq  uint64     // 每次序列化递增，受 mutex 保护
 	flushMutex  sync.Mutex // 串行化磁盘写入，与 mutex 互不持有
+	writtenSeq  uint64     // 已落盘的最新快照序号，受 flushMutex 保护
+}
+
+// historyPayload 是一次序列化出的文件内容。序列化在 mutex 下、写盘在 flushMutex 下，
+// 两次写盘可能交错，seq 用来丢弃已经被更新快照覆盖的旧内容。
+type historyPayload struct {
+	data []byte
+	seq  uint64
 }
 
 func NewHistoryRecorder(filePath string, capacity int, sampleInterval time.Duration, logger types.Logger) *HistoryRecorder {
@@ -196,12 +208,20 @@ func (r *HistoryRecorder) Add(temp types.TemperatureData, fanData *types.FanData
 		GPUFanRPM: temp.GPUFanRPM,
 	}
 
-	var flushPayload []byte
+	var flushPayload historyPayload
 
 	r.mutex.Lock()
 	if !r.enabled {
 		r.mutex.Unlock()
 		return types.TemperatureHistoryPoint{}, false
+	}
+	// 系统时钟回拨（NTP 校时、双系统 RTC、CMOS 掉电）后新样本早于最新记录，负的间隔
+	// 若也按"太快"丢弃，记录会停到墙钟重新追上旧的最新时间为止，可能长达数小时。
+	// 这时丢掉落在"未来"的点和事件再接着记，缓冲区保持按时间升序。
+	// 只看样本时间戳不够：一次过期的读数也会早于最新记录，但那时墙钟并没有回拨。
+	rollback := historyClockRollbackTolerance.Milliseconds()
+	if r.lastSampleAt-timestamp > rollback && r.lastSampleAt-time.Now().UnixMilli() > rollback {
+		r.discardAfterLocked(timestamp)
 	}
 	if r.lastSampleAt > 0 && timestamp-r.lastSampleAt < r.sampleInterval.Milliseconds() {
 		r.mutex.Unlock()
@@ -228,12 +248,25 @@ func (r *HistoryRecorder) Add(temp types.TemperatureData, fanData *types.FanData
 	}
 	r.mutex.Unlock()
 
-	if flushPayload != nil {
+	if flushPayload.data != nil {
 		if err := r.writeFile(flushPayload); err != nil {
 			r.logError("保存温度历史失败: %v", err)
 		}
 	}
 	return point, true
+}
+
+// discardAfterLocked 丢弃时间戳晚于 timestamp 的采样点与事件：时钟回拨后它们落在
+// "未来"，留着会让缓冲区乱序，前端按最新时间戳裁剪保留窗口时也会以它们为准。
+func (r *HistoryRecorder) discardAfterLocked(timestamp int64) {
+	points := slices.DeleteFunc(r.snapshotPointsLocked(), func(p types.TemperatureHistoryPoint) bool {
+		return p.Timestamp > timestamp
+	})
+	r.applyLoadedPointsLocked(points)
+	r.events = slices.DeleteFunc(r.events, func(e types.TimelineEvent) bool {
+		return e.Timestamp > timestamp
+	})
+	r.dirtyCount++
 }
 
 // AddEvent 记录一次时间轴事件。返回落库后的事件与是否真的记录了。
@@ -252,14 +285,15 @@ func (r *HistoryRecorder) AddEvent(eventType, labelKey string) (types.TimelineEv
 		LabelKey:  labelKey,
 	}
 
-	var flushPayload []byte
+	var flushPayload historyPayload
 
 	r.mutex.Lock()
 	// 去重状态独立于 events 维护：关闭后台记录时事件不入缓冲，但重复通知
 	// （例如唤醒时 Windows 连发的两个电源事件）依然要折叠成一次，
 	// 否则会向 GUI 广播出两个重叠的标记。
-	if r.lastEventType == event.Type && r.lastEventKey == event.LabelKey &&
-		r.lastEventAt > 0 && event.Timestamp-r.lastEventAt < timelineEventDedupeWindow.Milliseconds() {
+	// 间隔为负说明时钟回拨过，不是重复通知。
+	if gap := event.Timestamp - r.lastEventAt; r.lastEventType == event.Type && r.lastEventKey == event.LabelKey &&
+		r.lastEventAt > 0 && gap >= 0 && gap < timelineEventDedupeWindow.Milliseconds() {
 		r.mutex.Unlock()
 		return types.TimelineEvent{}, false
 	}
@@ -285,7 +319,7 @@ func (r *HistoryRecorder) AddEvent(eventType, labelKey string) (types.TimelineEv
 	}
 	r.mutex.Unlock()
 
-	if flushPayload != nil {
+	if flushPayload.data != nil {
 		if err := r.writeFile(flushPayload); err != nil {
 			r.logError("保存温度历史失败: %v", err)
 		}
@@ -438,6 +472,18 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 		return err
 	}
 
+	// count 直接来自文件，损坏时可以是任意 uint32。不校验就拿去 make，会在启动时
+	// 申请几十 GB，这种 OOM 无法 recover，之后每次启动都会崩。
+	recordSize := 20 // timestamp + CPU/GPU 温度 + 风扇转速
+	if version >= historyBinaryVersionPower {
+		recordSize += 8
+	}
+	if version >= historyBinaryVersionFans {
+		recordSize += 8
+	}
+	if uint64(count)*uint64(recordSize) > uint64(reader.Len()) {
+		return fmt.Errorf("history point count out of range: %d", count)
+	}
 	points := make([]types.TemperatureHistoryPoint, 0, count)
 	for i := uint32(0); i < count; i++ {
 		var timestamp int64
@@ -592,9 +638,9 @@ func (r *HistoryRecorder) pointCountLocked() int {
 	return r.next
 }
 
-func (r *HistoryRecorder) serializeLocked() ([]byte, error) {
+func (r *HistoryRecorder) serializeLocked() (historyPayload, error) {
 	if r.filePath == "" {
-		return nil, nil
+		return historyPayload{}, nil
 	}
 	pointCount := r.pointCountLocked()
 	var flags uint8
@@ -638,7 +684,8 @@ func (r *HistoryRecorder) serializeLocked() ([]byte, error) {
 		buf = appendHistoryString(buf, event.Type)
 		buf = appendHistoryString(buf, event.LabelKey)
 	}
-	return buf, nil
+	r.payloadSeq++
+	return historyPayload{data: buf, seq: r.payloadSeq}, nil
 }
 
 // appendHistoryString 以 uint16 长度前缀写入字符串。
@@ -651,25 +698,34 @@ func appendHistoryString(buf []byte, value string) []byte {
 }
 
 // writeFile 在锁外执行磁盘 IO。flushMutex 串行化多次并发 Flush 调用。
-func (r *HistoryRecorder) writeFile(payload []byte) error {
-	if payload == nil || r.filePath == "" {
+func (r *HistoryRecorder) writeFile(payload historyPayload) error {
+	if payload.data == nil || r.filePath == "" {
 		return nil
 	}
 	r.flushMutex.Lock()
 	defer r.flushMutex.Unlock()
 
+	// 序列化与写盘之间不持有 mutex，更晚序列化的快照可能先写完（例如 SetEnabled(false)
+	// 清空后，一次早先开始的 Add 又把旧的启用态写回去），此时旧快照必须丢弃。
+	if payload.seq <= r.writtenSeq {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(r.filePath), 0755); err != nil {
 		return err
 	}
 	tmpPath := r.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, payload.data, 0644); err != nil {
 		return err
 	}
-	_ = os.Remove(r.filePath)
+	// os.Rename 在 Windows 上也会直接替换已存在的目标；先删目标会留出一段没有
+	// history.bin 的窗口，这时崩溃或断电就丢掉全部历史。
 	if err := os.Rename(tmpPath, r.filePath); err != nil {
 		_ = os.Remove(tmpPath)
-		return os.WriteFile(r.filePath, payload, 0644)
+		if err := os.WriteFile(r.filePath, payload.data, 0644); err != nil {
+			return err
+		}
 	}
+	r.writtenSeq = payload.seq
 	return nil
 }
 
