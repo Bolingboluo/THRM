@@ -35,7 +35,9 @@ func (a *CoreApp) ReinstallPawnIO() (map[string]any, error) {
 	}
 
 	a.logInfo("开始重新安装 PawnIO: %s", installerPath)
-	a.bridgeManager.Stop()
+	// 仅 Stop 不够：温控循环下一个周期就会重新拉起桥接并加载驱动，和卸载/安装撞在一起。
+	a.bridgeManager.Hold()
+	defer a.bridgeManager.Release()
 
 	if installedVersionBefore != "" {
 		a.logInfo("检测到已安装 PawnIO (版本: %s)，先执行卸载再安装", installedVersionBefore)
@@ -77,6 +79,7 @@ func (a *CoreApp) ReinstallPawnIO() (map[string]any, error) {
 	}
 
 	result["success"] = true
+	a.bridgeManager.Release()
 	bridgeResult, bridgeErr := a.bridgeManager.RestartPawnIO()
 	if bridgeErr != nil {
 		result["bridgeWarning"] = bridgeErr.Error()

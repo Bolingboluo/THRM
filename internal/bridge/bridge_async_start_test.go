@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/TIANLI0/THRM/internal/types"
 )
 
 // TestEnsureRunningIsNonBlocking 是 #6 的回归测试。
@@ -103,4 +105,72 @@ func TestIsStartingMessageRecognised(t *testing.T) {
 	if IsStarting("") {
 		t.Fatal("IsStarting 不应把空信息判为过渡态")
 	}
+}
+
+func waitStartFinished(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for m.IsStarting() {
+		if time.Now().After(deadline) {
+			t.Fatal("后台启动未在 5 秒内结束")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestEnsureRunningReportsFailureAfterFailedStart 验证启动失败后不再冒充"正在启动"。
+//
+// 修复前 EnsureRunning 对失败的启动同样返回 ErrStarting：温度读取因此一直被当作过渡态，
+// 既不走内置传感器降级，也不计入温度失效，风扇安全兜底永远不会触发；
+// 而且每个采样周期都会重新拉起一次子进程。
+func TestEnsureRunningReportsFailureAfterFailedStart(t *testing.T) {
+	m := NewManager(testLogger{})
+	if err := m.EnsureRunning(); !errors.Is(err, ErrStarting) {
+		t.Fatalf("首次调用应返回 ErrStarting，实际: %v", err)
+	}
+	// 测试二进制旁边没有桥接程序，启动必然失败。
+	waitStartFinished(t, m)
+
+	err := m.EnsureRunning()
+	if err == nil || errors.Is(err, ErrStarting) || IsStarting(err.Error()) {
+		t.Fatalf("启动失败后应返回真实原因，实际: %v", err)
+	}
+	if m.IsStarting() {
+		t.Fatal("退避期内不应再次拉起桥接进程")
+	}
+
+	data := m.GetTemperature(types.TemperatureSelection{})
+	if data.Success || IsStarting(data.Error) {
+		t.Fatalf("GetTemperature 不应再上报过渡态，实际: %+v", data)
+	}
+}
+
+func TestBridgeStartBackoffGrowsAndCaps(t *testing.T) {
+	if got := bridgeStartBackoff(1); got != bridgeStartRetryBase {
+		t.Fatalf("首次失败退避 = %v，期望 %v", got, bridgeStartRetryBase)
+	}
+	if got := bridgeStartBackoff(2); got != 2*bridgeStartRetryBase {
+		t.Fatalf("第二次失败退避 = %v，期望 %v", got, 2*bridgeStartRetryBase)
+	}
+	if got := bridgeStartBackoff(100); got != bridgeStartRetryMax {
+		t.Fatalf("退避上限 = %v，期望 %v", got, bridgeStartRetryMax)
+	}
+}
+
+// TestHoldSuppressesAutoStart 验证 Hold 期间不会被温控循环重新拉起。
+func TestHoldSuppressesAutoStart(t *testing.T) {
+	m := NewManager(testLogger{})
+	m.Hold()
+	if err := m.EnsureRunning(); !errors.Is(err, ErrHeld) {
+		t.Fatalf("Hold 期间应返回 ErrHeld，实际: %v", err)
+	}
+	if m.IsStarting() {
+		t.Fatal("Hold 期间不应拉起桥接进程")
+	}
+
+	m.Release()
+	if err := m.EnsureRunning(); !errors.Is(err, ErrStarting) {
+		t.Fatalf("Release 后应重新开始启动，实际: %v", err)
+	}
+	waitStartFinished(t, m)
 }

@@ -4,6 +4,7 @@ package temperature
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 const (
 	helperCommandTimeout = 1200 * time.Millisecond
 	gpuVendorCacheTTL    = 30 * time.Second
+	// 同一条桥接告警的最短重复间隔。
+	bridgeWarnInterval = time.Minute
 )
 
 // pawnIoRemediationHint 与桥接侧 bridge/TempBridge/Program.cs 的 PawnIoRemediationHint
@@ -40,6 +43,30 @@ type Reader struct {
 
 	// 桥接不可用时的降级读取节流状态，见 fallback.go。
 	fallback fallbackState
+
+	// 桥接告警限频：桥接长期不可用时每个采样周期都会走到告警，不限频的话
+	// 一天要同步写几万行一模一样的日志。Read 也会被 IPC 的测试读取并发调用，需加锁。
+	warnMutex        sync.Mutex
+	lastBridgeWarn   string
+	lastBridgeWarnAt time.Time
+}
+
+// warnBridge 记录桥接告警：内容变化时立即记录，相同内容每 bridgeWarnInterval 最多一次。
+func (r *Reader) warnBridge(format string, v ...any) {
+	if r.logger == nil {
+		return
+	}
+	msg := fmt.Sprintf(format, v...)
+	now := time.Now()
+	r.warnMutex.Lock()
+	if msg == r.lastBridgeWarn && now.Sub(r.lastBridgeWarnAt) < bridgeWarnInterval {
+		r.warnMutex.Unlock()
+		return
+	}
+	r.lastBridgeWarn = msg
+	r.lastBridgeWarnAt = now
+	r.warnMutex.Unlock()
+	r.logger.Warn("%s", msg)
 }
 
 // NewReader 创建新的温度读取器
@@ -76,7 +103,7 @@ func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureDat
 			if bridgeTemp.CpuTemp == 0 && (selection.DisableGpu || bridgeTemp.GpuTemp == 0) {
 				temp.BridgeOk = false
 				temp.BridgeMsg = "桥接程序未返回有效温度（CPU/GPU 均为 0）；" + pawnIoRemediationHint
-				r.logger.Warn("桥接程序返回空温度数据，使用备用方法")
+				r.warnBridge("桥接程序返回空温度数据，使用备用方法")
 
 				fallback := r.readFallback(selection.DisableGpu)
 				temp.CPUTemp = fallback.cpuTemp
@@ -95,7 +122,7 @@ func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureDat
 			return temp
 		}
 
-		r.logger.Warn("桥接程序读取温度失败: %s, 使用备用方法", bridgeTemp.Error)
+		r.warnBridge("桥接程序读取温度失败: %s, 使用备用方法", bridgeTemp.Error)
 		temp.BridgeOk = false
 		temp.BridgeMsg = bridgeTemp.Error
 		if strings.TrimSpace(temp.BridgeMsg) == "" {

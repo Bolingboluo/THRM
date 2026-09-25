@@ -47,6 +47,16 @@ type Manager struct {
 	startMu   sync.Mutex
 	startDone chan struct{}
 
+	// 启动失败后的退避状态，受 startMu 保护。失败后若仍按"正在启动"上报，上层会一直
+	// 当作过渡态：既不走内置传感器降级，也不计入温度失效，风扇安全兜底永远不会触发，
+	// 而且每个采样周期都会重新拉起一次子进程。因此失败后改报真实原因，并按退避间隔重试。
+	startFailures int
+	nextStartAt   time.Time
+	lastStartErr  string
+
+	// held 为真时暂停自动拉起，见 Hold。
+	held atomic.Bool
+
 	// 最近一次真实读取结果，供 GetStatus 作为诊断数据复用，避免状态查询自己发命令。
 	lastTemp   types.BridgeTemperatureData
 	lastTempAt int64
@@ -59,6 +69,8 @@ const (
 	bridgeExitTimeout           = 2 * time.Second
 	bridgeProcessExitWait       = 3 * time.Second
 	bridgeStartupTimeout        = 30 * time.Second
+	bridgeStartRetryBase        = 5 * time.Second
+	bridgeStartRetryMax         = 2 * time.Minute
 
 	BridgeStateNotStarted = "not_started"
 	BridgeStateStarting   = "starting"
@@ -103,14 +115,81 @@ func IsStarting(message string) bool {
 	return strings.Contains(message, StartingMessage)
 }
 
-// EnsureRunning 确保桥接可用。若需要启动，启动在后台进行并立即返回 ErrStarting，
+// ErrHeld 表示桥接被 Hold 暂停（例如正在重装 PawnIO），此期间不会自动拉起。
+var ErrHeld = errors.New("桥接程序已暂停（正在维护温度驱动）")
+
+// errStartAborted 表示启动完成时已收到停止请求，不属于启动失败，不计入退避。
+var errStartAborted = errors.New("桥接程序已请求停止")
+
+// EnsureRunning 确保桥接可用。若需要启动，启动在后台进行并立即返回，
 // 调用方（温控循环等热路径）因此永远不会被子进程启动握手阻塞。
+//
+// 首次启动返回 ErrStarting；一旦启动失败过，就返回上次失败的原因（直到某次启动成功），
+// 并且只在退避间隔到期后才重新拉起进程。
 func (m *Manager) EnsureRunning() error {
 	if m.healthy() {
 		return nil
 	}
-	m.beginStartAsync()
-	return ErrStarting
+	if m.held.Load() {
+		return ErrHeld
+	}
+
+	m.startMu.Lock()
+	failures := m.startFailures
+	retryDue := !time.Now().Before(m.nextStartAt)
+	lastStartErr := m.lastStartErr
+	m.startMu.Unlock()
+
+	if failures == 0 {
+		m.beginStartAsync()
+		return ErrStarting
+	}
+	if retryDue {
+		m.beginStartAsync()
+	}
+	return errors.New(lastStartErr)
+}
+
+// Hold 停止桥接并暂停自动拉起，直到 Release。用于重装 PawnIO 这类必须保证
+// 驱动没有被占用的操作：否则温控循环下一个周期就会重新拉起桥接并加载驱动。
+func (m *Manager) Hold() {
+	m.held.Store(true)
+	m.Stop()
+}
+
+// Release 解除 Hold，并清空启动失败退避，让下一次调用立即尝试启动。
+func (m *Manager) Release() {
+	m.startMu.Lock()
+	m.startFailures = 0
+	m.nextStartAt = time.Time{}
+	m.startMu.Unlock()
+	m.held.Store(false)
+}
+
+// bridgeStartBackoff 返回第 failures 次连续启动失败之后的重试间隔。
+func bridgeStartBackoff(failures int) time.Duration {
+	delay := bridgeStartRetryBase
+	for i := 1; i < failures && delay < bridgeStartRetryMax; i++ {
+		delay *= 2
+	}
+	return min(delay, bridgeStartRetryMax)
+}
+
+// recordStartResult 在一次后台启动结束时更新退避状态。
+func (m *Manager) recordStartResult(err error) {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+	switch {
+	case err == nil:
+		m.startFailures = 0
+		m.nextStartAt = time.Time{}
+		m.lastStartErr = ""
+	case errors.Is(err, errStartAborted):
+	default:
+		m.startFailures++
+		m.nextStartAt = time.Now().Add(bridgeStartBackoff(m.startFailures))
+		m.lastStartErr = err.Error()
+	}
 }
 
 // EnsureRunningWait 供用户主动触发的操作使用：需要一个真正可用的桥接，
@@ -118,6 +197,9 @@ func (m *Manager) EnsureRunning() error {
 func (m *Manager) EnsureRunningWait(timeout time.Duration) error {
 	if m.healthy() {
 		return nil
+	}
+	if m.held.Load() {
+		return ErrHeld
 	}
 
 	done := m.beginStartAsync()
@@ -188,20 +270,24 @@ func (m *Manager) beginStartAsync() <-chan struct{} {
 	m.mutex.Unlock()
 
 	go func() {
+		var startErr error
 		defer func() {
 			if r := recover(); r != nil {
+				startErr = fmt.Errorf("启动桥接程序时发生 panic: %v", r)
 				m.mutex.Lock()
-				m.setState(BridgeStateFailed, fmt.Errorf("启动桥接程序时发生 panic: %v", r))
+				m.setState(BridgeStateFailed, startErr)
 				m.mutex.Unlock()
 			}
+			// 先记录结果再清除 starting，避免调用方在两者之间看到"未在启动、也没失败过"。
+			m.recordStartResult(startErr)
 			m.startMu.Lock()
 			m.starting.Store(false)
 			m.startMu.Unlock()
 			close(done)
 		}()
 
-		if err := m.startStdio(); err != nil {
-			m.logger.Error("桥接程序后台启动失败: %v", err)
+		if startErr = m.startStdio(); startErr != nil {
+			m.logger.Error("桥接程序后台启动失败: %v", startErr)
 		}
 	}()
 
@@ -289,7 +375,7 @@ func (m *Manager) startStdio() error {
 		_ = cmd.Process.Kill()
 		go func() { _ = cmd.Wait() }()
 		go drainLines(lineCh)
-		return fmt.Errorf("桥接程序已请求停止")
+		return errStartAborted
 	}
 	m.cmd = cmd
 	m.stdin = stdin
