@@ -21,6 +21,10 @@ var generatedIDCounter uint64
 
 const exportPrefix = "B2C1."
 
+// maxImportPayloadBytes 是分享码解压后 JSON 的上限。一条曲线 JSON 约 1KB，
+// 上百个方案也远不到这个量；不设上限的话，一段粘贴进来的压缩炸弹就能把核心进程撑爆。
+const maxImportPayloadBytes = 1 << 20
+
 type exportPayload struct {
 	V        int                     `json:"v"`
 	Active   string                  `json:"a"`
@@ -301,9 +305,12 @@ func Import(code string) ([]types.FanCurveProfile, string, error) {
 	}
 	defer zr.Close()
 
-	plain, err := io.ReadAll(zr)
+	plain, err := io.ReadAll(io.LimitReader(zr, maxImportPayloadBytes+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("导入数据读取失败")
+	}
+	if len(plain) > maxImportPayloadBytes {
+		return nil, "", fmt.Errorf("导入数据过大")
 	}
 
 	var payload exportPayload

@@ -1,6 +1,11 @@
 package curveprofiles
 
 import (
+	"bytes"
+	"compress/zlib"
+	"encoding/base64"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/TIANLI0/THRM/internal/types"
@@ -141,6 +146,41 @@ func TestImport_Invalid(t *testing.T) {
 	_, _, err = Import("")
 	if err == nil {
 		t.Error("Import should fail on empty string")
+	}
+}
+
+// 分享码是用户粘贴进来的，解压后的体积必须有上限：高压缩比的 zlib 炸弹
+// 否则会被 io.ReadAll 整个展开，把核心进程撑到 OOM。
+func TestImport_RejectsOversizedPayload(t *testing.T) {
+	// JSON 前面的空白是合法的，所以这段载荷没有上限时能正常导入。
+	plain := strings.Repeat(" ", maxImportPayloadBytes) + `{"v":1,"a":"p1","p":[]}`
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	if _, err := zw.Write([]byte(plain)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Import(exportPrefix + base64.RawURLEncoding.EncodeToString(buf.Bytes())); err == nil {
+		t.Fatal("解压后超过上限的分享码应被拒绝")
+	}
+
+	// 上限不能卡住真实的大导出：200 个方案、每个 50 个点。
+	curve := make([]types.FanCurvePoint, 50)
+	for i := range curve {
+		curve[i] = types.FanCurvePoint{Temperature: 30 + i, RPM: 4000}
+	}
+	profiles := make([]types.FanCurveProfile, 200)
+	for i := range profiles {
+		profiles[i] = types.FanCurveProfile{ID: fmt.Sprintf("p%d-%d", i, 1<<40), Name: "方案名称六字", Curve: curve}
+	}
+	code, err := Export("p0", profiles)
+	if err != nil {
+		t.Fatalf("Export error: %v", err)
+	}
+	if imported, _, err := Import(code); err != nil || len(imported) != len(profiles) {
+		t.Fatalf("真实规模的导出应能导入: len=%d err=%v", len(imported), err)
 	}
 }
 
