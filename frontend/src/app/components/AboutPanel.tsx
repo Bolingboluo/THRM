@@ -290,6 +290,7 @@ export default function AboutPanel() {
   const sponsorRef = useRef<HTMLDivElement | null>(null);
   const sponsorPopupRef = useRef<HTMLDivElement | null>(null);
   const sponsorHoverTimerRef = useRef<number | null>(null);
+  const releaseRequestRef = useRef<AbortController | null>(null);
 
   const refreshFirmwareDetails = useCallback(async () => {
     setFirmwareRefreshing(true);
@@ -396,6 +397,13 @@ export default function AboutPanel() {
 
   const checkLatestRelease = useCallback(
     async (channel: ReleaseChannel = releaseChannel) => {
+      // 快速来回切换渠道时，较慢的旧请求可能晚于新请求返回，把版本号、更新日志
+      // 以及全局 store 里的安装包地址覆盖成另一个渠道的；只认最新一次请求的结果。
+      releaseRequestRef.current?.abort();
+      const controller = new AbortController();
+      releaseRequestRef.current = controller;
+      const isStale = () => releaseRequestRef.current !== controller;
+
       setReleaseLoading(true);
       setReleaseError('');
       setRelease('', BRAND.latestReleaseUrl);
@@ -408,10 +416,12 @@ export default function AboutPanel() {
         if (channel === 'prerelease') {
           const response = await fetch(`${BRAND.releasesApiUrl}?per_page=30`, {
             headers,
+            signal: controller.signal,
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
           const releases = (await response.json()) as GithubRelease[];
+          if (isStale()) return;
           targetRelease =
             (Array.isArray(releases) ? releases : []).find(
               (item) => !item?.draft && !!item?.prerelease,
@@ -426,9 +436,13 @@ export default function AboutPanel() {
             return;
           }
         } else {
-          const response = await fetch(BRAND.latestReleaseApiUrl, { headers });
+          const response = await fetch(BRAND.latestReleaseApiUrl, {
+            headers,
+            signal: controller.signal,
+          });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           targetRelease = (await response.json()) as GithubRelease;
+          if (isStale()) return;
         }
 
         setLatestReleaseTag(targetRelease?.tag_name || '');
@@ -444,13 +458,15 @@ export default function AboutPanel() {
           targetRelease?.html_url || BRAND.latestReleaseUrl,
         );
       } catch {
+        if (isStale()) return;
         setLatestReleaseTag('');
         setLatestReleaseUrl(BRAND.latestReleaseUrl);
         setLatestReleaseBody('');
         setLatestReleaseIsPrerelease(false);
         setReleaseError(t('aboutPanel.version.checkFailed'));
       } finally {
-        setReleaseLoading(false);
+        // 被取代的请求不动加载态，交给最新那次收尾
+        if (!isStale()) setReleaseLoading(false);
       }
     },
     [releaseChannel, setRelease, t],
@@ -473,6 +489,11 @@ export default function AboutPanel() {
 
   useEffect(() => {
     void checkLatestRelease(releaseChannel);
+    return () => {
+      // 切换渠道或卸载时作废在途请求，卸载后不再回写界面和全局 store
+      releaseRequestRef.current?.abort();
+      releaseRequestRef.current = null;
+    };
   }, [checkLatestRelease, releaseChannel]);
 
   useEffect(() => {
