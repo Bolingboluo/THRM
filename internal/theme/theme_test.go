@@ -99,3 +99,70 @@ func TestMetaFields(t *testing.T) {
 		t.Error("Meta.ID should not be empty after assignment")
 	}
 }
+
+func writeTheme(t *testing.T, baseDir, folder, manifest, css string) {
+	t.Helper()
+	dir := filepath.Join(baseDir, folder)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifestName), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, styleName), []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 主题 id 来自清单而不是文件夹名：ReadCSS 曾直接拼 <dir>/<id>/theme.css，
+// 文件夹改名后列表里有这个主题却读不到样式；复制出来还没改 id 的文件夹
+// 则让列表展示副本的清单、样式却读自原文件夹。
+func TestReadCSSResolvesFolderFromManifestID(t *testing.T) {
+	root := t.TempDir()
+	installDir := filepath.Join(root, "install", "themes")
+	userDir := filepath.Join(root, "user", "themes")
+	writeTheme(t, userDir, "mytheme", `{"id":"cool","name":"Cool"}`, "cool-css")
+	writeTheme(t, userDir, "thrm", `{"id":"thrm","name":"Orig"}`, "orig-css")
+	writeTheme(t, userDir, "a-copy", `{"id":"thrm","name":"CopyA"}`, "copy-a-css")
+	writeTheme(t, userDir, "thrm - Copy", `{"id":"thrm","name":"CopyB"}`, "copy-b-css")
+	writeTheme(t, installDir, "thrm", `{"id":"thrm","name":"Installed"}`, "install-css")
+
+	m := NewManager(installDir, userDir, fstest.MapFS{
+		"thrm/theme.json": &fstest.MapFile{Data: []byte(`{"id":"thrm","name":"Builtin"}`)},
+		"thrm/theme.css":  &fstest.MapFile{Data: []byte("builtin-css")},
+	})
+
+	names := map[string]string{}
+	for _, meta := range m.List() {
+		names[meta.ID] = meta.Name
+	}
+	if names["cool"] != "Cool" || names["thrm"] != "Orig" {
+		t.Fatalf("List() = %v, want cool=Cool thrm=Orig", names)
+	}
+	for id, want := range map[string]string{"cool": "cool-css", "thrm": "orig-css"} {
+		got, err := m.ReadCSS(id)
+		if err != nil || got != want {
+			t.Errorf("ReadCSS(%q) = %q, %v; want %q", id, got, err, want)
+		}
+	}
+}
+
+func TestReadCSSFallsBackBySourcePriority(t *testing.T) {
+	root := t.TempDir()
+	installDir := filepath.Join(root, "install", "themes")
+	userDir := filepath.Join(root, "user", "themes")
+	writeTheme(t, installDir, "inst", `{"id":"sample","name":"Installed"}`, "install-css")
+
+	m := NewManager(installDir, userDir, fstest.MapFS{
+		"sample/theme.json": &fstest.MapFile{Data: []byte(`{"id":"sample"}`)},
+		"sample/theme.css":  &fstest.MapFile{Data: []byte("builtin-css")},
+		"other/theme.json":  &fstest.MapFile{Data: []byte(`{"id":"other"}`)},
+		"other/theme.css":   &fstest.MapFile{Data: []byte("other-css")},
+	})
+	if got, err := m.ReadCSS("sample"); err != nil || got != "install-css" {
+		t.Errorf("ReadCSS(sample) = %q, %v; want install-css", got, err)
+	}
+	if got, err := m.ReadCSS("other"); err != nil || got != "other-css" {
+		t.Errorf("ReadCSS(other) = %q, %v; want other-css", got, err)
+	}
+}

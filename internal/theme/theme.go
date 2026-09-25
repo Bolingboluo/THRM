@@ -142,27 +142,11 @@ func (m *Manager) copyBuiltin(id, baseDir string) error {
 func (m *Manager) List() []Meta {
 	merged := map[string]Meta{}
 
-	// 内置（最低优先级）
-	if m.builtin != nil {
-		if entries, err := fs.ReadDir(m.builtin, "."); err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				if meta, ok := m.readBuiltinMeta(entry.Name()); ok {
-					merged[meta.ID] = meta
-				}
-			}
+	// 来源按优先级从低到高排列，后扫描的覆盖先扫描的。
+	for _, src := range m.sources() {
+		for _, entry := range scanFS(src.fsys, src.source) {
+			merged[entry.meta.ID] = entry.meta
 		}
-	}
-
-	// 安装目录覆盖内置
-	for _, meta := range m.scanDir(m.installDir, SourceInstall) {
-		merged[meta.ID] = meta
-	}
-	// 用户目录优先级最高
-	for _, meta := range m.scanDir(m.userDir, SourceUser) {
-		merged[meta.ID] = meta
 	}
 
 	out := make([]Meta, 0, len(merged))
@@ -178,21 +162,52 @@ func (m *Manager) List() []Meta {
 	return out
 }
 
-func (m *Manager) scanDir(baseDir, source string) []Meta {
-	if baseDir == "" {
-		return nil
+type themeSource struct {
+	fsys   fs.FS
+	source string
+}
+
+// sources 按优先级从低到高返回各主题来源：内置 < 安装目录 < 用户目录。
+func (m *Manager) sources() []themeSource {
+	var out []themeSource
+	if m.builtin != nil {
+		out = append(out, themeSource{m.builtin, SourceBuiltin})
 	}
-	entries, err := os.ReadDir(baseDir)
+	for _, src := range []struct{ dir, source string }{
+		{m.installDir, SourceInstall},
+		{m.userDir, SourceUser},
+	} {
+		if src.dir != "" {
+			out = append(out, themeSource{os.DirFS(src.dir), src.source})
+		}
+	}
+	return out
+}
+
+// themeEntry 是一个主题清单及其所在的文件夹名。
+type themeEntry struct {
+	meta   Meta
+	folder string
+}
+
+// scanFS 扫描某个来源根目录下的各主题文件夹。
+//
+// 主题以清单里的 id 为准，文件夹名只在清单缺 id 时兜底，所以 List 和 ReadCSS
+// 都必须经由这里把 id 解析回文件夹：复制出来还没改 id 的文件夹会与原主题同 id，
+// 按文件夹名直接拼路径会让列表展示一个主题、样式却读自另一个文件夹。
+// 同一来源内同 id 时与 id 同名的文件夹优先，其余按文件夹名排序先到先得。
+func scanFS(fsys fs.FS, source string) []themeEntry {
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return nil
 	}
-	var out []Meta
+	var out []themeEntry
+	index := map[string]int{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		manifestPath := filepath.Join(baseDir, entry.Name(), manifestName)
-		data, err := os.ReadFile(manifestPath)
+		data, err := fs.ReadFile(fsys, entry.Name()+"/"+manifestName)
 		if err != nil {
 			continue
 		}
@@ -201,22 +216,16 @@ func (m *Manager) scanDir(baseDir, source string) []Meta {
 			continue
 		}
 		meta.Source = source
-		out = append(out, meta)
+		if i, dup := index[meta.ID]; dup {
+			if entry.Name() == meta.ID {
+				out[i] = themeEntry{meta, entry.Name()}
+			}
+			continue
+		}
+		index[meta.ID] = len(out)
+		out = append(out, themeEntry{meta, entry.Name()})
 	}
 	return out
-}
-
-func (m *Manager) readBuiltinMeta(id string) (Meta, bool) {
-	data, err := fs.ReadFile(m.builtin, id+"/"+manifestName)
-	if err != nil {
-		return Meta{}, false
-	}
-	meta, ok := parseMeta(data, id)
-	if !ok {
-		return Meta{}, false
-	}
-	meta.Source = SourceBuiltin
-	return meta, true
 }
 
 // parseMeta 解析 theme.json；folderName 用于在清单缺少 id 时兜底，并校验 id 合法性。
@@ -245,19 +254,16 @@ func (m *Manager) ReadCSS(id string) (string, error) {
 		return "", fmt.Errorf("非法主题 id: %q", id)
 	}
 
-	for _, baseDir := range []string{m.userDir, m.installDir} {
-		if baseDir == "" {
-			continue
-		}
-		path := filepath.Join(baseDir, id, styleName)
-		if data, err := os.ReadFile(path); err == nil {
-			return string(data), nil
-		}
-	}
-
-	if m.builtin != nil {
-		if data, err := fs.ReadFile(m.builtin, id+"/"+styleName); err == nil {
-			return string(data), nil
+	sources := m.sources()
+	for i := len(sources) - 1; i >= 0; i-- {
+		for _, entry := range scanFS(sources[i].fsys, sources[i].source) {
+			if entry.meta.ID != id {
+				continue
+			}
+			if data, err := fs.ReadFile(sources[i].fsys, entry.folder+"/"+styleName); err == nil {
+				return string(data), nil
+			}
+			break
 		}
 	}
 
