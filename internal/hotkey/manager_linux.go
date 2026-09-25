@@ -24,6 +24,7 @@ const (
 type binding struct {
 	shortcut string
 	hk       *hotkeylib.Hotkey
+	keydown  <-chan hotkeylib.Event
 	stopChan chan struct{}
 }
 
@@ -106,6 +107,7 @@ func (m *Manager) setBinding(action Action, shortcut string) error {
 	b := &binding{
 		shortcut: shortcut,
 		hk:       hk,
+		keydown:  hk.Keydown(),
 		stopChan: make(chan struct{}),
 	}
 	m.bindings[action] = b
@@ -127,12 +129,18 @@ func (m *Manager) unregisterBinding(action Action) {
 	delete(m.bindings, action)
 }
 
+// listen 只从注册时取到的 keydown 通道收事件。Unregister 会在另一个 goroutine 里
+// 关闭并替换 hk 的事件通道：每轮都调 hk.Keydown() 是数据竞争，读到已关闭的旧通道
+// 还会误触发一次动作，所以通道关闭即退出。
 func (m *Manager) listen(action Action, b *binding) {
 	for {
 		select {
 		case <-b.stopChan:
 			return
-		case <-b.hk.Keydown():
+		case _, ok := <-b.keydown:
+			if !ok {
+				return
+			}
 			if m.onAction != nil {
 				m.onAction(action, b.shortcut)
 			}
