@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // withStubSession 把会话建立替换为不触碰 WMI 的假实现，并返回建立次数计数器。
@@ -131,5 +132,48 @@ func TestReaderReleasesWorkerWhenUnsupported(t *testing.T) {
 	}
 	if reader.worker != nil {
 		t.Fatal("标记不支持后不应重新创建 COM 工作线程")
+	}
+}
+
+// 一次卡死的 WMI 调用不能把调用方（温控循环）无限期挂住。
+func TestCOMWorkerCallTimesOut(t *testing.T) {
+	withStubSession(t)
+	previous := comCallTimeout
+	comCallTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { comCallTimeout = previous })
+
+	worker := newCOMWorker()
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	defer func() {
+		// 等卡住的调用真正返回再结束测试，清理函数才能安全地恢复 openSession。
+		close(release)
+		<-finished
+		worker.close()
+	}()
+
+	start := time.Now()
+	err := worker.do(func(*wmiSession) error {
+		<-release
+		close(finished)
+		return nil
+	})
+	if !errors.Is(err, errCOMTimeout) {
+		t.Fatalf("卡死的调用应返回 errCOMTimeout，实际: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("超时返回耗时 %v", elapsed)
+	}
+}
+
+func TestLockedBackendRetryDelayGrowsAndCaps(t *testing.T) {
+	if got := lockedBackendRetryDelay(maxConsecutiveFailures); got != lockedBackendRetryBase {
+		t.Fatalf("首次退避 = %v，期望 %v", got, lockedBackendRetryBase)
+	}
+	if got := lockedBackendRetryDelay(maxConsecutiveFailures + 1); got != 2*lockedBackendRetryBase {
+		t.Fatalf("第二次退避 = %v，期望 %v", got, 2*lockedBackendRetryBase)
+	}
+	if got := lockedBackendRetryDelay(100); got != lockedBackendRetryMax {
+		t.Fatalf("退避上限 = %v，期望 %v", got, lockedBackendRetryMax)
 	}
 }

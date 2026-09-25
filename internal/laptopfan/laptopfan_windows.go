@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/TIANLI0/THRM/internal/types"
 	"github.com/go-ole/go-ole"
@@ -20,7 +21,19 @@ const (
 
 	// 连续失败多少次后永久标记为不支持，停止继续尝试。
 	maxConsecutiveFailures = 3
+
+	// 已锁定后端连续失败后的重试退避。
+	lockedBackendRetryBase = 30 * time.Second
+	lockedBackendRetryMax  = 10 * time.Minute
 )
+
+// comCallTimeout 是单次 WMI 调用的最长等待（声明为变量以便测试缩短）。读取在温控循环里
+// 同步进行，一次卡死的 ExecMethod（winmgmt 停滞、唤醒后提供程序挂起）若无限等待，
+// 会让温度更新、转速下发和安全兜底一起停摆。
+var comCallTimeout = 5 * time.Second
+
+// errCOMTimeout 表示 COM 工作线程未在 comCallTimeout 内完成调用。
+var errCOMTimeout = errors.New("WMI 调用超时")
 
 // fanBackend 一种机型的风扇转速读取后端。
 type fanBackend struct {
@@ -47,6 +60,7 @@ type windowsReader struct {
 	worker      *comWorker
 	backendIdx  int // 已选定的后端下标；-1 表示尚未探测成功
 	failures    int
+	retryAt     time.Time // 已锁定后端失败后的下次重试时间
 	unsupported bool
 }
 
@@ -65,18 +79,26 @@ func (r *windowsReader) read() (FanSpeeds, bool) {
 		r.worker = newCOMWorker()
 	}
 
-	// 已锁定后端：只用它读取，连续失败则标记不支持。
+	// 已锁定后端：只用它读取。它已经证明本机可用，连续失败不永久停用——唤醒后 WMI
+	// 重建期间常有几秒的失败，停用会让转速在本次运行里一直消失——改为退避后重试。
 	if r.backendIdx >= 0 {
+		if time.Now().Before(r.retryAt) {
+			return FanSpeeds{}, false
+		}
 		backend := fanBackends[r.backendIdx]
 		speeds, err := r.runBackend(backend)
 		if err != nil {
 			r.failures++
 			if r.failures >= maxConsecutiveFailures {
-				r.disableLocked("笔记本风扇转速读取已停用（%s）: %v", backend.name, err)
+				r.retryAt = time.Now().Add(lockedBackendRetryDelay(r.failures))
+				if r.failures == maxConsecutiveFailures && r.logger != nil {
+					r.logger.Warn("笔记本风扇转速读取连续失败（%s），稍后重试: %v", backend.name, err)
+				}
 			}
 			return FanSpeeds{}, false
 		}
 		r.failures = 0
+		r.retryAt = time.Time{}
 		return speeds, true
 	}
 
@@ -103,18 +125,37 @@ func (r *windowsReader) read() (FanSpeeds, bool) {
 	return FanSpeeds{}, false
 }
 
+// lockedBackendRetryDelay 返回已锁定后端第 failures 次连续失败后的重试间隔。
+func lockedBackendRetryDelay(failures int) time.Duration {
+	delay := lockedBackendRetryBase
+	for i := maxConsecutiveFailures; i < failures && delay < lockedBackendRetryMax; i++ {
+		delay *= 2
+	}
+	return min(delay, lockedBackendRetryMax)
+}
+
 // runBackend 在 COM 工作线程上执行一次后端读取。
 func (r *windowsReader) runBackend(backend fanBackend) (FanSpeeds, error) {
-	var speeds FanSpeeds
+	// 结果经缓冲 channel 交回：超时返回后调用可能仍在工作线程上跑完，
+	// 不能让它去写一个调用方已经不再读的局部变量。
+	result := make(chan FanSpeeds, 1)
 	err := r.worker.do(func(session *wmiSession) error {
-		result, err := backend.read(session)
+		speeds, err := backend.read(session)
 		if err != nil {
 			return err
 		}
-		speeds = result
+		result <- speeds
 		return nil
 	})
-	return speeds, err
+	if err != nil {
+		if errors.Is(err, errCOMTimeout) {
+			// 卡住的线程等不回来了：交给它自己在调用返回后退出，下次换一个新线程。
+			r.worker.close()
+			r.worker = nil
+		}
+		return FanSpeeds{}, err
+	}
+	return <-result, nil
 }
 
 // disableLocked 永久停用读取，并释放常驻的 WMI 连接与 COM 线程。
@@ -224,8 +265,19 @@ func (w *comWorker) do(fn func(session *wmiSession) error) error {
 		return errors.New("COM 工作线程已关闭")
 	}
 	done := make(chan error, 1)
-	w.tasks <- comTask{fn: fn, done: done}
-	return <-done
+	timer := time.NewTimer(comCallTimeout)
+	defer timer.Stop()
+	select {
+	case w.tasks <- comTask{fn: fn, done: done}:
+	case <-timer.C:
+		return errCOMTimeout
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errCOMTimeout
+	}
 }
 
 func (w *comWorker) close() {
