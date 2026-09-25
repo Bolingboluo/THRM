@@ -113,12 +113,14 @@ func (m *Manager) tryLoadFromPathLocked(configPath string) bool {
 	var rawConfig map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawConfig); err != nil {
 		m.logError("解析配置文件元数据失败 %s: %v", configPath, err)
+		m.preserveCorruptConfig(configPath)
 		return false
 	}
 
 	var config types.AppConfig
 	if err := json.Unmarshal(data, &config); err != nil {
 		m.logError("解析配置文件失败 %s: %v", configPath, err)
+		m.preserveCorruptConfig(configPath)
 		return false
 	}
 
@@ -290,7 +292,7 @@ func (m *Manager) saveLocked() error {
 	} else if err := os.MkdirAll(defaultConfigDir, 0755); err != nil {
 		defaultSaveErr = err
 		m.logError("创建默认配置目录失败: %v", err)
-	} else if err := os.WriteFile(defaultConfigPath, data, 0644); err != nil {
+	} else if err := writeFileAtomic(defaultConfigPath, data, 0644); err != nil {
 		defaultSaveErr = err
 		m.logError("保存配置到默认目录失败: %v", err)
 	} else {
@@ -312,7 +314,7 @@ func (m *Manager) saveLocked() error {
 		return err
 	}
 
-	if err := os.WriteFile(installConfigPath, data, 0644); err != nil {
+	if err := writeFileAtomic(installConfigPath, data, 0644); err != nil {
 		m.logError("保存配置到安装目录失败: %v", err)
 		return err
 	}
@@ -320,6 +322,57 @@ func (m *Manager) saveLocked() error {
 	m.config.ConfigPath = installConfigPath
 	m.logInfo("配置保存到安装目录成功: %s", installConfigPath)
 	return nil
+}
+
+// writeFileAtomic 先写同目录临时文件并刷盘，再替换目标文件。
+//
+// 直接 os.WriteFile 会先截断再写入：写到一半时断电、蓝屏或强制关机，留下的是空文件
+// 或半截 JSON，下次启动解析失败就会退回旧目录或默认配置，用户的曲线与学习结果全部丢失。
+// 替换是原子的：目标文件要么是旧内容，要么是完整的新内容。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	// Windows 上 os.Rename 使用 MOVEFILE_REPLACE_EXISTING，会直接覆盖已有文件。
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		// 目标被其它进程（杀毒扫描、编辑器）以不允许删除的方式打开时无法替换。
+		// 这时退回直接写入：失败返回会让调用方改写安装目录，下次加载反而读到旧文件。
+		return os.WriteFile(path, data, perm)
+	}
+	return nil
+}
+
+// preserveCorruptConfig 把解析失败的配置文件改名保留。加载失败后会回退到默认配置并立即
+// 保存，不先挪开的话损坏的文件会被覆盖，连手工恢复的机会都没有。
+func (m *Manager) preserveCorruptConfig(configPath string) {
+	backupPath := configPath + ".corrupt"
+	if err := os.Rename(configPath, backupPath); err != nil {
+		m.logError("保留损坏的配置文件失败 %s: %v", configPath, err)
+		return
+	}
+	m.logError("已将无法解析的配置文件另存为: %s", backupPath)
 }
 
 // GetDefaultConfigDir 获取默认配置目录
@@ -380,6 +433,29 @@ func (m *Manager) Set(config types.AppConfig) {
 	m.config = config.Clone()
 	m.bumpRevisionLocked()
 	m.mu.Unlock()
+}
+
+// View 在读锁内把当前配置交给 fn 只读访问，省去 Get 的深拷贝，供热路径读取少量字段。
+// fn 不得修改 cfg、不得保留其中切片/映射的引用，也不得调用 Manager 的其它方法（会自死锁）。
+func (m *Manager) View(fn func(cfg *types.AppConfig)) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	fn(&m.config)
+}
+
+// Mutate 在锁内对当前配置做读-改-写（不落盘）。fn 返回 false 表示未改动，此时配置与
+// 修订号都保持不变。用于后台循环只改自己负责的字段：先 Get 再 Set 会把两次调用之间
+// 其它路径（GUI、托盘、快捷键）写入的改动整体回退。返回值为操作后的配置副本。
+func (m *Manager) Mutate(fn func(cfg *types.AppConfig) bool) (types.AppConfig, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next := m.config.Clone()
+	if !fn(&next) {
+		return m.config.Clone(), false
+	}
+	m.config = next
+	m.bumpRevisionLocked()
+	return next.Clone(), true
 }
 
 // Update 更新配置并保存（线程安全，原子操作）

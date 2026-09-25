@@ -209,3 +209,76 @@ func TestLoad_NoConfig(t *testing.T) {
 		t.Error("Load with no config should return default config with FanCurve")
 	}
 }
+
+func TestMutateOnlyBumpsRevisionWhenChanged(t *testing.T) {
+	m := NewManager("/tmp", testLogger{})
+	m.Set(types.GetDefaultConfig(false))
+	_, rev := m.GetWithRevision()
+
+	if _, changed := m.Mutate(func(cfg *types.AppConfig) bool { return false }); changed {
+		t.Fatal("fn 返回 false 时不应报告改动")
+	}
+	if _, got := m.GetWithRevision(); got != rev {
+		t.Fatalf("未改动时修订号不应变化: %d -> %d", rev, got)
+	}
+
+	after, changed := m.Mutate(func(cfg *types.AppConfig) bool {
+		cfg.AutoControl = !cfg.AutoControl
+		return true
+	})
+	if !changed || after.AutoControl == types.GetDefaultConfig(false).AutoControl {
+		t.Fatal("Mutate 应应用改动并返回新配置")
+	}
+	if _, got := m.GetWithRevision(); got == rev {
+		t.Fatal("改动后修订号应递增")
+	}
+}
+
+// TestSaveLeavesNoTempFiles 验证原子保存不会在配置目录留下临时文件。
+func TestSaveLeavesNoTempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	isolateUserDirs(t, tmpDir)
+	m := NewManager("/tmp", testLogger{})
+	m.Set(types.GetDefaultConfig(false))
+	for range 3 {
+		if err := m.Save(); err != nil {
+			t.Fatalf("Save error: %v", err)
+		}
+	}
+
+	entries, err := os.ReadDir(m.GetDefaultConfigDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "config.json" {
+			t.Fatalf("配置目录残留了多余文件: %s", entry.Name())
+		}
+	}
+}
+
+// TestLoadPreservesCorruptConfig 验证损坏的配置文件被改名保留，而不是被默认配置直接覆盖。
+func TestLoadPreservesCorruptConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	isolateUserDirs(t, tmpDir)
+	m := NewManager("", testLogger{})
+	configDir := m.GetDefaultConfigDir()
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.json")
+	corrupt := []byte(`{"autoControl": tr`)
+	if err := os.WriteFile(configPath, corrupt, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Load(false)
+
+	backup, err := os.ReadFile(configPath + ".corrupt")
+	if err != nil {
+		t.Fatalf("损坏的配置文件应被保留: %v", err)
+	}
+	if string(backup) != string(corrupt) {
+		t.Fatalf("保留的内容不一致: %q", backup)
+	}
+}
