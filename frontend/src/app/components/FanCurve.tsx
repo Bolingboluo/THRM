@@ -1552,9 +1552,10 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, f
   }, [manualGearPresets]);
 
   const selectedManualPointIndex = useMemo(() => {
-    const selected = manualPoints.findIndex((p) => p.gear === (config.manualGear || '标准') && p.level === (config.manualLevel || '中'));
+    // BS1 每个挡位只有一个点，配置里残留的"低/高"子级别不能让选中状态整个丢掉。
+    const selected = manualPoints.findIndex((p) => p.gear === (config.manualGear || '标准') && (isBs1 || p.level === (config.manualLevel || '中')));
     return selected >= 0 ? selected : 4;
-  }, [config.manualGear, config.manualLevel, manualPoints]);
+  }, [config.manualGear, config.manualLevel, isBs1, manualPoints]);
 
   const rememberedManualGearLevels = useMemo(() => {
     return ((config as any).manualGearLevels ?? {}) as Record<string, string>;
@@ -1792,7 +1793,8 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, f
                   <div className="flex items-start justify-between px-2 text-[11px]">
                     {manualPoints.map((point) => (
                       <span key={`${point.key}-label`} className={clsx('w-6 text-center truncate', point.colorClass)}>
-                        {t('fanCurve.manualGear.pointIndex', { index: point.levelIndex + 1 })}
+                        {/* BS1 的四个点就是固件的挡位 1..4，按子级别编号会全部显示成"1档" */}
+                        {t('fanCurve.manualGear.pointIndex', { index: (isBs1 ? point.gearIndex : point.levelIndex) + 1 })}
                       </span>
                     ))}
                   </div>
