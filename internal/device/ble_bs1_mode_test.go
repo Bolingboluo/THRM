@@ -188,3 +188,62 @@ func TestBS1SetFanSpeedResetsModeAfterWriteFailure(t *testing.T) {
 		t.Fatal("目标写入失败后不能继续假定固件仍在实时模式")
 	}
 }
+
+// newBLEConnectedManager 造一个"已通过 BS1 连上"的 Manager，回调计数随之返回。
+func newBLEConnectedManager(t *testing.T) (*Manager, *int) {
+	t.Helper()
+	m := NewManager(nil)
+	disconnects := 0
+	m.SetCallbacks(nil, func() { disconnects++ })
+	m.bleManager.isConnected = true
+	m.isConnected = true
+	m.deviceType = types.DeviceTypeBLE
+	m.lastDeviceType = types.DeviceTypeBLE
+	return m, &disconnects
+}
+
+// 保活包写入失败时 BLEManager 只复位了它自己的标记。Manager 若仍记着已连接，
+// connect() 会直接返回成功而不去扫描，之后每次写入都报"BLE 设备未连接"，
+// 只能重启程序才能恢复（issue #43，3.7.0 日志里的现象）。
+func TestBS1LinkLossClearsManagerConnection(t *testing.T) {
+	m, disconnects := newBLEConnectedManager(t)
+
+	m.bleManager.handleDisconnect()
+
+	if m.IsConnected() {
+		t.Fatal("BS1 链路断开后 Manager 仍报告已连接，重连会跳过扫描直接返回成功")
+	}
+	if m.IsBS1() {
+		t.Fatal("BS1 链路断开后设备类型未清空，控制命令仍会被路由到已断开的 BLE 链路")
+	}
+	if *disconnects != 1 {
+		t.Fatalf("断连回调触发了 %d 次，期望 1 次", *disconnects)
+	}
+}
+
+// 显式断开已经抢先复位并自行发过回调时，迟到的链路丢失通知不能再发一次。
+func TestBS1LinkLossAfterExplicitDisconnectDoesNotNotifyTwice(t *testing.T) {
+	m, disconnects := newBLEConnectedManager(t)
+	m.isConnected = false
+	m.deviceType = ""
+
+	m.handleBLELinkLost()
+
+	if *disconnects != 0 {
+		t.Fatalf("Manager 已断开时仍触发了 %d 次断连回调", *disconnects)
+	}
+}
+
+// 迟到的链路丢失通知不能把期间新建立的连接当成断开清掉。
+func TestBS1LinkLossIgnoredOnceReconnected(t *testing.T) {
+	m, disconnects := newBLEConnectedManager(t)
+
+	m.handleBLELinkLost()
+
+	if !m.IsConnected() || !m.IsBS1() {
+		t.Fatal("BLE 链路仍然在线，却被当成断开清掉了连接状态")
+	}
+	if *disconnects != 0 {
+		t.Fatalf("BLE 链路仍然在线时触发了 %d 次断连回调", *disconnects)
+	}
+}

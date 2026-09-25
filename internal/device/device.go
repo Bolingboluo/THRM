@@ -234,7 +234,33 @@ func (m *Manager) SeedLastTransport(transport string) {
 func (m *Manager) SetCallbacks(onFanDataUpdate func(data *types.FanData), onDisconnect func()) {
 	m.onFanDataUpdate = onFanDataUpdate
 	m.onDisconnect = onDisconnect
-	m.bleManager.SetCallbacks(onFanDataUpdate, onDisconnect)
+	m.bleManager.SetCallbacks(onFanDataUpdate, m.handleBLELinkLost)
+}
+
+// handleBLELinkLost 处理 BS1 的意外断开（保活包写入失败）。
+//
+// BLEManager 只能复位它自己的连接标记，Manager 的连接状态必须在这里同步清掉。
+// 否则 connect() 看到 m.isConnected 仍为 true 就直接返回成功、根本不去扫描，
+// 之后每次写入都报"BLE 设备未连接"，只能重启程序才能恢复（issue #43）。
+func (m *Manager) handleBLELinkLost() {
+	m.mutex.Lock()
+	// 显式断开可能已经抢先复位并自行发出回调，或者这期间已经建立了新连接，
+	// 这两种情况都不能再动连接状态。
+	if !m.isConnected || m.deviceType != types.DeviceTypeBLE || m.bleManager.IsConnected() {
+		m.mutex.Unlock()
+		return
+	}
+	m.isConnected = false
+	m.deviceType = ""
+	m.currentFanData.Store(nil)
+	m.resetRealtimeControlStateLocked()
+	onDisconnect := m.onDisconnect
+	m.mutex.Unlock()
+
+	m.logInfo("设备连接已断开")
+	if onDisconnect != nil {
+		onDisconnect()
+	}
 }
 
 // SetDebugCapture controls expensive raw HID frame capture. Normal background
