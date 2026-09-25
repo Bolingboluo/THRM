@@ -76,7 +76,7 @@ interface AppStore {
   resyncCore: () => Promise<void>;
   connectDevice: () => Promise<void>;
   disconnectDevice: () => Promise<void>;
-  updateConfig: (config: types.AppConfig) => Promise<void>;
+  setConfig: (config: types.AppConfig) => void;
 
   startEventListeners: () => () => void;
 }
@@ -188,8 +188,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   // 缺少主动重取时，一次 IPC 抖动就会让界面永久停在"设备未连接"，只能重启 GUI。
   // 与 initializeApp 的区别是不触碰 isLoading，避免恢复时闪一下加载态。
   //
-  // 重取过程本身会发请求，而每个成功的请求都会再触发一次 core-service-ok，
-  // 因此需要 resyncInFlight 兜住重入，避免一次恢复引发多轮重复拉取。
+  // core-service-ok 只在"错误→正常"跳变时发出，但恢复期间 core-resynced 与它可能先后到达，
+  // 因此仍用 resyncInFlight 兜住重入，避免一次恢复引发多轮重复拉取。
   resyncCore: async () => {
     if (resyncInFlight) return;
     resyncInFlight = true;
@@ -251,17 +251,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  updateConfig: async (config) => {
-    try {
-      await configService.updateConfig(config);
-      set({ config, error: null });
-    } catch (error) {
-      console.error('配置更新失败:', error);
-      set({ error: i18n.t('store.errors.saveConfig') });
-      toast.error(i18n.t('store.errors.saveConfig'));
-      throw error;
-    }
-  },
+  // 只同步本地状态，不再写回核心：各组件调用 onConfigChange 之前都已经通过
+  // apiService.updateConfig 或专用接口（setAutoControl、setLightStrip 等）落盘，
+  // 或者就是刚从 getConfig 读回来的。这里再写一次只会把旧快照覆盖回去。
+  setConfig: (config) => set({ config, error: null }),
 
   startEventListeners: () => {
     if (typeof window === 'undefined' || !(window as any).runtime?.EventsOnMultiple) {

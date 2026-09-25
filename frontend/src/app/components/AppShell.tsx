@@ -24,10 +24,10 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { BrowserOpenURL, Environment, Quit, WindowIsMaximised, WindowMinimise, WindowToggleMaximise } from '../../../wailsjs/runtime/runtime';
 import { WindowBlurEnabled } from '../../../wailsjs/go/main/App';
-import { types } from '../../../wailsjs/go/models';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { BRAND } from '../lib/brand';
+import { useAppStore } from '../store/app-store';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import UpdateProgress from './UpdateProgress';
 
@@ -91,8 +91,6 @@ interface AppShellProps {
   activeTab: ActiveTab;
   onTabChange: (tab: ActiveTab) => void;
   isConnected: boolean;
-  fanData: types.FanData | null;
-  temperature: types.TemperatureData | null;
   autoControl: boolean;
   error: string | null;
   bridgeWarning: string | null;
@@ -215,19 +213,19 @@ function TitleBar({
 
 function StatusBadges({
   isConnected,
-  fanData,
-  temperature,
   autoControl,
   compact = false,
 }: {
   isConnected: boolean;
-  fanData: types.FanData | null;
-  temperature: types.TemperatureData | null;
   autoControl: boolean;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
-  const fanSpinDuration = getFanSpinDuration(fanData?.currentRpm);
+  // 遥测直接从 store 取原始值：只有这两个数变化时才重渲染徽标，
+  // 不必让整个 AppShell 和当前标签页跟着每次推送一起刷新。
+  const currentRpm = useAppStore((state) => state.fanData?.currentRpm);
+  const maxTemp = useAppStore((state) => state.temperature?.maxTemp);
+  const fanSpinDuration = getFanSpinDuration(currentRpm);
   const baseClass = compact
     ? 'inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-medium'
     : 'inline-flex h-8 items-center gap-1.5 rounded-xl border px-3 text-[13px] font-medium';
@@ -267,16 +265,16 @@ function StatusBadges({
       {isConnected && (
         <>
           <span className={clsx(baseClass, 'glacier-status-chip border-border bg-card font-semibold shadow-sm shadow-black/5')}>
-            <Thermometer className={clsx('h-3.5 w-3.5', getTempColor(temperature?.maxTemp))} />
-            <span className={clsx(getTempColor(temperature?.maxTemp))}>
-              {temperature?.maxTemp ?? '--'}°C
+            <Thermometer className={clsx('h-3.5 w-3.5', getTempColor(maxTemp))} />
+            <span className={clsx(getTempColor(maxTemp))}>
+              {maxTemp ?? '--'}°C
             </span>
           </span>
           <span className={clsx(baseClass, 'glacier-status-chip border-border bg-card font-semibold text-primary shadow-sm shadow-black/5')}>
             <span className={clsx('inline-flex', fanSpinDuration && 'animate-spin')} style={fanSpinStyle}>
               <Fan className="h-3.5 w-3.5" />
             </span>
-            {fanData?.currentRpm ?? '--'} RPM
+            {currentRpm ?? '--'} RPM
           </span>
         </>
       )}
@@ -510,8 +508,6 @@ export default function AppShell({
   activeTab,
   onTabChange,
   isConnected,
-  fanData,
-  temperature,
   autoControl,
   error,
   bridgeWarning,
@@ -657,7 +653,7 @@ export default function AppShell({
           closeLabel={t('appShell.titleBar.close')}
           isMaximised={isMaximised}
           leftOffset={sidebarWidth}
-          leftSlot={<StatusBadges isConnected={isConnected} fanData={fanData} temperature={temperature} autoControl={autoControl} compact />}
+          leftSlot={<StatusBadges isConnected={isConnected} autoControl={autoControl} compact />}
           onMinimise={() => WindowMinimise()}
           onToggleMaximise={handleToggleMaximise}
           onClose={() => Quit()}
@@ -764,7 +760,7 @@ export default function AppShell({
             style={DRAG_STYLE}
           >
             <div className="mx-auto flex min-h-9 max-w-[1120px] min-[1536px]:max-w-[1280px] min-[1800px]:max-w-[1440px] min-[2400px]:max-w-[1560px] items-center justify-start gap-3" style={NO_DRAG_STYLE}>
-              <StatusBadges isConnected={isConnected} fanData={fanData} temperature={temperature} autoControl={autoControl} />
+              <StatusBadges isConnected={isConnected} autoControl={autoControl} />
             </div>
           </header>
         )}

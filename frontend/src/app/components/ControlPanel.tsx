@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Play,
@@ -44,6 +44,7 @@ import { toast } from 'sonner';
 import { DebugInfo, type DeviceDebugCommandResult, type DeviceSettings, type FlydigiCompatStatus, type ThemeMeta } from '../types/app';
 import { type AppLocale, useLocale } from '../lib/i18n';
 import { getManualGearLabel, getManualLevelLabel } from '../lib/manualGearPresets';
+import { useAppStore } from '../store/app-store';
 import FanCurveProfileSelect from './FanCurveProfileSelect';
 import LightStripPreview from './LightStripPreview';
 import {
@@ -76,7 +77,6 @@ interface ControlPanelProps {
   config: types.AppConfig;
   onConfigChange: (config: types.AppConfig) => void;
   isConnected: boolean;
-  fanData: types.FanData | null;
   temperature: types.TemperatureData | null;
   legionFnQSupported: boolean;
   deviceModel: string | null;
@@ -581,9 +581,45 @@ function SelectionField({
   );
 }
 
+/* ── 实时概览 ── */
+
+// 概览自己订阅遥测：转速每秒最多推送 4 次，只刷新这三张卡片，不带动整个设置页重渲染。
+function ControlOverview({ isBs1 }: { isBs1: boolean }) {
+  const { t } = useTranslation();
+  const fanData = useAppStore((state) => state.fanData);
+  const temperature = useAppStore((state) => state.temperature);
+
+  return (
+    <Section title={t('controlPanel.overview.title')} icon={Settings}>
+      <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-3">
+        <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
+          <div className="text-sm text-muted-foreground">{t('controlPanel.overview.currentTemperature')}</div>
+          <div className={clsx(
+            'mt-1 text-2xl font-semibold tabular-nums',
+            (temperature?.maxTemp ?? 0) > 80 ? 'text-red-500' : (temperature?.maxTemp ?? 0) > 70 ? 'text-amber-500' : 'text-primary'
+          )}>
+            {temperature?.maxTemp ?? '--'}°C
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">{t('controlPanel.overview.cpuGpuTemperature', { cpu: temperature?.cpuTemp ?? '--', gpu: temperature?.gpuTemp ?? '--' })}</div>
+        </div>
+        <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
+          <div className="text-sm text-muted-foreground">{t('controlPanel.overview.currentRpm')}</div>
+          <div className="mt-1 text-2xl font-semibold tabular-nums text-primary">{fanData?.currentRpm ?? '--'} RPM</div>
+          <div className="mt-1 text-xs text-muted-foreground">{translateWorkMode(fanData?.workMode, t)}</div>
+        </div>
+        <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
+          <div className="text-sm text-muted-foreground">{isBs1 ? t('controlPanel.overview.currentGear') : t('controlPanel.overview.targetRpm')}</div>
+          <div className="mt-1 text-2xl font-semibold tabular-nums text-primary">{isBs1 ? (getManualGearLabel(fanData?.setGear) || '--') : `${fanData?.targetRpm ?? '--'} RPM`}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{isBs1 ? translateWorkMode(fanData?.workMode, t) : t('controlPanel.overview.gearValue', { gear: getManualGearLabel(fanData?.setGear) || '--' })}</div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 /* ── Main ControlPanel ── */
 
-export default function ControlPanel({ config, onConfigChange, isConnected, fanData, temperature, legionFnQSupported, deviceModel, deviceSettings }: ControlPanelProps) {
+function ControlPanel({ config, onConfigChange, isConnected, temperature, legionFnQSupported, deviceModel, deviceSettings }: ControlPanelProps) {
   const { t } = useTranslation();
   const { locale, setLocale } = useLocale();
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
@@ -1845,30 +1881,7 @@ export default function ControlPanel({ config, onConfigChange, isConnected, fanD
   return (
     <>
       <div className="space-y-4">
-        <Section title={t('controlPanel.overview.title')} icon={Settings}>
-          <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-3">
-            <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
-              <div className="text-sm text-muted-foreground">{t('controlPanel.overview.currentTemperature')}</div>
-              <div className={clsx(
-                'mt-1 text-2xl font-semibold tabular-nums',
-                (temperature?.maxTemp ?? 0) > 80 ? 'text-red-500' : (temperature?.maxTemp ?? 0) > 70 ? 'text-amber-500' : 'text-primary'
-              )}>
-                {temperature?.maxTemp ?? '--'}°C
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">{t('controlPanel.overview.cpuGpuTemperature', { cpu: temperature?.cpuTemp ?? '--', gpu: temperature?.gpuTemp ?? '--' })}</div>
-            </div>
-            <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
-              <div className="text-sm text-muted-foreground">{t('controlPanel.overview.currentRpm')}</div>
-              <div className="mt-1 text-2xl font-semibold tabular-nums text-primary">{fanData?.currentRpm ?? '--'} RPM</div>
-              <div className="mt-1 text-xs text-muted-foreground">{translateWorkMode(fanData?.workMode, t)}</div>
-            </div>
-            <div className="rounded-xl border border-border/70 bg-muted/30 p-4 text-center">
-              <div className="text-sm text-muted-foreground">{isBs1 ? t('controlPanel.overview.currentGear') : t('controlPanel.overview.targetRpm')}</div>
-              <div className="mt-1 text-2xl font-semibold tabular-nums text-primary">{isBs1 ? (getManualGearLabel(fanData?.setGear) || '--') : `${fanData?.targetRpm ?? '--'} RPM`}</div>
-              <div className="mt-1 text-xs text-muted-foreground">{isBs1 ? translateWorkMode(fanData?.workMode, t) : t('controlPanel.overview.gearValue', { gear: getManualGearLabel(fanData?.setGear) || '--' })}</div>
-            </div>
-          </div>
-        </Section>
+        <ControlOverview isBs1={isBs1} />
 
         {/* ═══════════ 1. 灯光效果 ═══════════ */}
         {!isBs1 && (
@@ -3185,3 +3198,6 @@ export default function ControlPanel({ config, onConfigChange, isConnected, fanD
     </>
   );
 }
+
+// 只随真实的 props 变化重渲染；温度约 2 秒一次，转速推送已由 ControlOverview 自行消化。
+export default memo(ControlPanel);
