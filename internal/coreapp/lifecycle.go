@@ -244,6 +244,8 @@ func (a *CoreApp) Stop() {
 			a.logError("等待温度监控停止超时，继续执行退出流程")
 		}
 	}
+	// 历史记录攒够一批才落盘，退出前补写一次，否则每次关机/重启都会丢掉最后一段采样。
+	a.flushTemperatureHistory("shutdown")
 	if a.hotkeyManager != nil {
 		a.hotkeyManager.Stop()
 	}
@@ -272,6 +274,15 @@ func (a *CoreApp) Stop() {
 	a.cleanup()
 
 	a.logInfo("核心服务已停止")
+}
+
+func (a *CoreApp) flushTemperatureHistory(reason string) {
+	if a.tempHistory == nil {
+		return
+	}
+	if err := a.tempHistory.Flush(); err != nil {
+		a.logError("温度历史落盘失败[%s]: %v", reason, err)
+	}
 }
 
 // initSystemTray 初始化系统托盘

@@ -486,6 +486,8 @@ func (a *CoreApp) onSystemSuspend() {
 		if a.ipcServer != nil {
 			a.ipcServer.BroadcastEvent(ipc.EventDeviceDisconnected, nil)
 		}
+		// 把挂起标记和最后一段采样写盘：睡眠中电池耗尽或直接断电时，内存里的这些都会丢失。
+		a.flushTemperatureHistory("suspend")
 		a.logInfo("挂起前清理完成，耗时 %s", time.Since(start).Round(time.Millisecond))
 	})
 
