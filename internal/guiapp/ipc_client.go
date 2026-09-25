@@ -12,27 +12,51 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// ipcRequestPolicy 返回请求的超时与"重连后是否可自动重发"。
+//
+// 长请求的超时必须高于核心侧自身的最坏耗时，否则核心仍在干活时 GUI 就先报失败：
+// ReinstallPawnIO 最坏是卸载 90s + 安装 90s 再加重启桥接；RestartPawnIO 要重启驱动
+// 并重新初始化桥接；桥接探测/状态查询在桥接自愈重启期间也会被拖慢。
 func ipcRequestPolicy(reqType ipc.RequestType) (time.Duration, bool) {
 	switch reqType {
 	case ipc.ReqGetDeviceStatus, ipc.ReqGetCurrentFanData, ipc.ReqGetConfig,
 		ipc.ReqGetFanCurve, ipc.ReqGetFanCurveProfiles, ipc.ReqGetTemperature,
-		ipc.ReqGetTemperatureHistory, ipc.ReqGetBridgeProgramStatus,
+		ipc.ReqGetTemperatureHistory,
 		ipc.ReqGetDebugInfo, ipc.ReqGetDeviceDebugFrames, ipc.ReqGetSmartLightStatus,
 		ipc.ReqPing:
 		return 6 * time.Second, true
-	case ipc.ReqConnect, ipc.ReqRestartPawnIO, ipc.ReqReinstallPawnIO:
+	case ipc.ReqGetBridgeProgramStatus:
+		return 15 * time.Second, true
+	case ipc.ReqConnect, ipc.ReqTestBridgeProgram:
 		return 30 * time.Second, false
+	case ipc.ReqRestartPawnIO:
+		return 90 * time.Second, false
+	case ipc.ReqReinstallPawnIO:
+		return 240 * time.Second, false
 	case ipc.ReqUpdateGuiResponseTime:
-		return 12 * time.Second, true
+		return ipcRegularRequestTimeout, true
 	default:
-		return 12 * time.Second, false
+		return ipcRegularRequestTimeout, false
 	}
 }
 
 const (
+	ipcRegularRequestTimeout     = 12 * time.Second
 	ipcTimeoutReconnectThreshold = 3
 	ipcTimeoutReconnectWindow    = 30 * time.Second
 )
+
+// ipcTimeoutCountsTowardReconnect 判断一次请求超时是否计入连续超时重连阈值。
+//
+// 超时上限高于常规请求的那批（设备连接、PawnIO 重启/重装、桥接探测）在核心侧本来就
+// 可能执行很久，它们超时只说明那项操作慢，不代表连接失效；计入阈值的话，一次重装
+// PawnIO 超时再叠加两次普通抖动，就会拆掉一条健康的连接。
+func ipcTimeoutCountsTowardReconnect(timeout time.Duration) bool {
+	return timeout <= ipcRegularRequestTimeout
+}
+
+// errGUIShuttingDown 表示 GUI 已进入退出流程，不再向核心服务发请求。
+var errGUIShuttingDown = errors.New("GUI 正在退出，已停止向核心服务发送请求")
 
 func shouldReconnectAfterIPCError(err error, consecutiveTimeouts uint32) bool {
 	if !errors.Is(err, ipc.ErrRequestTimeout) {
@@ -207,6 +231,11 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 
 // sendRequest 发送请求到核心服务
 func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, error) {
+	// 退出流程中不再发请求：一次恰好在途的前端调用会走到下面的 EnsureCoreServiceRunning，
+	// 把 QuitAll 刚让其退出的核心重新拉起来。
+	if a.shuttingDown.Load() {
+		return nil, errGUIShuttingDown
+	}
 	timeout, retryable := ipcRequestPolicy(reqType)
 	if !a.ipcClient.IsConnected() {
 		if !EnsureCoreServiceRunning() {
@@ -223,7 +252,7 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 		a.emitCoreServiceOK()
 	}
 
-	resp, err := a.ipcClient.SendRequestWithTimeout(reqType, data, timeout)
+	resp, gen, err := a.ipcClient.SendRequestTracked(reqType, data, timeout)
 	if err == nil {
 		a.resetIPCTimeouts()
 		a.emitCoreServiceOK()
@@ -231,7 +260,7 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 	}
 
 	timeoutCount := uint32(0)
-	if errors.Is(err, ipc.ErrRequestTimeout) {
+	if errors.Is(err, ipc.ErrRequestTimeout) && ipcTimeoutCountsTowardReconnect(timeout) {
 		timeoutCount = a.recordIPCTimeout(time.Now())
 	}
 	if !shouldReconnectAfterIPCError(err, timeoutCount) {
@@ -240,9 +269,15 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 		return nil, err
 	}
 	a.resetIPCTimeouts()
+	// 请求在途期间 GUI 可能已开始退出，此时同样不能去拉起核心。
+	if a.shuttingDown.Load() {
+		return nil, err
+	}
 
 	guiLogger.Warnf("IPC 请求失败，尝试重新连接核心服务后重试: %v", err)
-	a.ipcClient.Close()
+	// 只拆掉这次请求所在的连接。直接 Close() 关的是"当前"连接，
+	// 而看护协程或并发请求可能已经在这段时间里重连成功了。
+	a.ipcClient.CloseGeneration(gen)
 	if !EnsureCoreServiceRunning() {
 		wrapped := fmt.Errorf("核心服务连接断开且重新启动失败: %v", err)
 		a.emitCoreServiceError(wrapped.Error())

@@ -50,7 +50,7 @@ func (a *App) QuitAll() {
 	a.shuttingDown.Store(true)
 	a.captureWindowState()
 
-	a.sendRequest(ipc.ReqQuitApp, nil)
+	a.requestCoreQuit()
 
 	if a.ipcClient != nil {
 		a.ipcClient.Close()
@@ -58,6 +58,25 @@ func (a *App) QuitAll() {
 
 	if a.ctx != nil {
 		runtime.Quit(a.ctx)
+	}
+}
+
+// requestCoreQuit 通知核心退出。只用现有连接，断开时至多直连一次仍在运行的核心；
+// 不走 sendRequest，因为那条路径在未连接时会 EnsureCoreServiceRunning——
+// 为了发一条退出指令先把核心拉起来毫无意义。
+func (a *App) requestCoreQuit() {
+	if a.ipcClient == nil {
+		return
+	}
+	if !a.ipcClient.IsConnected() {
+		if err := a.ipcClient.Connect(); err != nil {
+			guiLogger.Infof("核心服务未连接，跳过退出通知: %v", err)
+			return
+		}
+	}
+	timeout, _ := ipcRequestPolicy(ipc.ReqQuitApp)
+	if _, err := a.ipcClient.SendRequestWithTimeout(ipc.ReqQuitApp, nil, timeout); err != nil {
+		guiLogger.Warnf("通知核心服务退出失败: %v", err)
 	}
 }
 

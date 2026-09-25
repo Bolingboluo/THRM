@@ -367,3 +367,176 @@ func TestBrokenFrameDoesNotDesyncStream(t *testing.T) {
 		t.Fatalf("响应不匹配: %+v", resp)
 	}
 }
+
+// TestPendingRequestFailsFastWhenConnectionDrops 验证连接断开时在途请求立即失败。
+//
+// 修复前 readLoop 退出时不清理 pending，等待者只能白等完整的超时（ReinstallPawnIO
+// 这类长请求要等好几分钟）才发现连接早已不在。
+func TestPendingRequestFailsFastWhenConnectionDrops(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := NewServer(func(req Request) Response {
+		if req.Type == ReqConnect {
+			close(entered)
+			<-release
+		}
+		return Response{Success: true}
+	}, testLogger{})
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	defer server.Stop()
+	defer close(release)
+
+	client := NewClient(testLogger{})
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.SendRequestWithTimeout(ReqConnect, nil, 30*time.Second)
+		errCh <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("请求未进入服务端处理")
+	}
+
+	start := time.Now()
+	server.Stop() // 断开所有客户端连接，模拟核心退出/崩溃
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrConnectionClosed) {
+			t.Fatalf("连接断开后的错误 = %v, want ErrConnectionClosed", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("在途请求在连接断开 %v 后才失败", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("在途请求没有随连接断开立即失败，仍在等待超时")
+	}
+	if client.IsConnected() {
+		t.Fatal("连接断开后客户端仍报告已连接")
+	}
+}
+
+// TestCloseGenerationSparesReplacementConnection 验证按代号关闭不会误伤新连接。
+//
+// 修复前 GUI 在请求失败后直接 Close()，关掉的是"当前"连接——若看护协程在这段时间里
+// 已经重连成功，被拆掉的就是那条健康的新连接。
+func TestCloseGenerationSparesReplacementConnection(t *testing.T) {
+	server := NewServer(func(req Request) Response {
+		return Response{Success: true}
+	}, testLogger{})
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	defer server.Stop()
+
+	client := NewClient(testLogger{})
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	_, staleGen, err := client.SendRequestTracked(ReqPing, nil, 5*time.Second)
+	if err != nil || staleGen == 0 {
+		t.Fatalf("首个请求失败: gen=%d err=%v", staleGen, err)
+	}
+
+	client.Close()
+	if err := client.Connect(); err != nil {
+		t.Fatalf("重连失败: %v", err)
+	}
+
+	if client.CloseGeneration(staleGen) {
+		t.Fatal("旧连接代号关闭了替换后的新连接")
+	}
+	if !client.IsConnected() {
+		t.Fatal("旧连接代号导致新连接被标记为断开")
+	}
+
+	_, gen, err := client.SendRequestTracked(ReqPing, nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("新连接上的请求失败: %v", err)
+	}
+	if gen == staleGen {
+		t.Fatalf("重连后连接代号未变化: %d", gen)
+	}
+	if !client.CloseGeneration(gen) {
+		t.Fatal("当前连接代号未能关闭当前连接")
+	}
+	if client.IsConnected() {
+		t.Fatal("CloseGeneration 之后仍报告已连接")
+	}
+}
+
+// TestOversizedRequestFrameDropsConnection 验证请求帧有大小上限。
+//
+// 修复前服务端用 ReadBytes 读到换行为止，本机任意进程只发字节不发换行，
+// 就能让以管理员身份运行的核心无限制地累积内存。
+func TestOversizedRequestFrameDropsConnection(t *testing.T) {
+	server := NewServer(func(req Request) Response {
+		return Response{Success: true}
+	}, testLogger{})
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	defer server.Stop()
+
+	// 上限以内的大请求（远大于真实的完整配置）必须照常处理。
+	client := NewClient(testLogger{})
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	resp, err := client.SendRequestWithTimeout(ReqUpdateConfig, strings.Repeat("c", 1<<20), 10*time.Second)
+	client.Close()
+	if err != nil || resp == nil || !resp.Success {
+		t.Fatalf("上限以内的大请求失败: resp=%+v err=%v", resp, err)
+	}
+
+	var conn net.Conn
+	for _, pipeName := range ipcPipeCandidates() {
+		conn, err = dialIPC(ipcEndpointFromName(pipeName), 2*time.Second)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer conn.Close()
+
+	// 超过上限且始终不带换行；服务端断开后剩余写入会失败，忽略即可。
+	go func() {
+		chunk := []byte(strings.Repeat("a", 64*1024))
+		for written := 0; written <= maxRequestFrameSize; written += len(chunk) {
+			if _, err := conn.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set read deadline error: %v", err)
+	}
+	_, err = bufio.NewReader(conn).ReadBytes('\n')
+	if err == nil {
+		t.Fatal("超限请求帧没有导致连接断开")
+	}
+	if isTimeoutError(err) {
+		t.Fatal("服务端在超限后仍保持连接，直到读超时")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for server.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("超限连接未从服务端摘除")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

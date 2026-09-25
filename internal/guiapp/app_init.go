@@ -46,7 +46,7 @@ func (a *App) Startup(ctx context.Context) {
 	} else {
 		guiLogger.Info("已连接到核心服务")
 		a.ipcClient.SetEventHandler(a.handleCoreEvent)
-		if resp, pingErr := a.ipcClient.SendRequest(ipc.ReqPing, nil); pingErr != nil || resp == nil || !resp.Success {
+		if resp, gen, pingErr := a.ipcClient.SendRequestTracked(ipc.ReqPing, nil, 0); pingErr != nil || resp == nil || !resp.Success {
 			if pingErr != nil {
 				guiLogger.Errorf("核心服务 Ping 失败: %v", pingErr)
 				a.emitCoreServiceError(pingErr.Error())
@@ -54,7 +54,8 @@ func (a *App) Startup(ctx context.Context) {
 				guiLogger.Errorf("核心服务 Ping 返回异常: %+v", resp)
 				a.emitCoreServiceError("核心服务 Ping 返回异常")
 			}
-			a.ipcClient.Close()
+			// 只关 Ping 所在的连接，看护协程此时可能已经换上了新连接。
+			a.ipcClient.CloseGeneration(gen)
 		} else {
 			a.emitCoreServiceOK()
 		}

@@ -227,7 +227,19 @@ const maxConcurrentRequestsPerClient = 16
 // 声明为变量以便测试缩短等待。
 var clientWriteTimeout = 10 * time.Second
 
+// maxRequestFrameSize 是服务端单条请求帧（含换行）的上限。
+//
+// 最大的合法请求是携带完整配置的 UpdateConfig，只有几十 KiB；4 MiB 留足余量。
+// 没有上限时，本机任意进程连上管道后只发字节不发换行，就能让以管理员身份运行的
+// 核心无限制地累积内存。超限按协议错误处理，直接断开该连接。
+const maxRequestFrameSize = 4 << 20
+
 var ErrRequestTimeout = errors.New("等待 IPC 响应超时")
+
+// ErrConnectionClosed 表示请求所在的连接在收到响应前已断开，响应不可能再到达。
+var ErrConnectionClosed = errors.New("IPC 连接已断开")
+
+var errFrameTooLarge = errors.New("IPC 请求帧超过大小上限")
 
 // RequestHandler 请求处理函数类型
 type RequestHandler func(req Request) Response
@@ -392,9 +404,13 @@ func (s *Server) handleClient(conn net.Conn, state *clientState) {
 	reader := bufio.NewReader(conn)
 
 	for s.isRunning() {
-		line, err := reader.ReadBytes('\n')
+		line, err := readFrame(reader, maxRequestFrameSize)
 		if err != nil {
-			s.logDebug("读取客户端请求失败: %v", err)
+			if errors.Is(err, errFrameTooLarge) {
+				s.logError("IPC 请求帧超过 %d 字节上限，断开该客户端", maxRequestFrameSize)
+			} else {
+				s.logDebug("读取客户端请求失败: %v", err)
+			}
 			return
 		}
 
@@ -425,6 +441,27 @@ func (s *Server) handleClient(conn net.Conn, state *clientState) {
 			defer func() { <-state.sem }()
 			s.serveRequest(state, req)
 		}(req)
+	}
+}
+
+// readFrame 读取一条以换行结尾的帧，累计超过 limit 字节即返回 errFrameTooLarge。
+// ReadSlice 每次最多交出一个缓冲区的数据，因此内存占用受 limit 约束，而不是像
+// ReadBytes 那样一直增长到读到换行为止。
+func readFrame(reader *bufio.Reader, limit int) ([]byte, error) {
+	var frame []byte
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if len(frame)+len(chunk) > limit {
+			return nil, errFrameTooLarge
+		}
+		// ReadSlice 返回的切片在下次读取时失效，必须拷贝出来。
+		frame = append(frame, chunk...)
+		if err == nil {
+			return frame, nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return nil, err
+		}
 	}
 }
 
@@ -628,10 +665,22 @@ type Client struct {
 	eventMutex   sync.RWMutex
 
 	pendingMutex sync.Mutex
-	pending      map[string]chan *Response
+	pending      map[string]pendingCall
 
 	connected bool
+	// gen 是当前连接的代号，每次成功 Connect 加一。调用方据此只作废真正出错的那条连接。
+	gen       uint64
 	connMutex sync.RWMutex
+}
+
+// pendingCall 是一个等待响应的请求。记下它所在的连接，连接断开时才能只让
+// 这条连接上的等待者立即失败，而不是各自白等完整的超时。
+//
+// ch 的所有权归"把它从 pending 中删除的一方"：删除者负责送达响应或关闭它，
+// 因此同一个 ch 不会被重复写入或关闭。
+type pendingCall struct {
+	conn net.Conn
+	ch   chan *Response
 }
 
 const (
@@ -643,7 +692,7 @@ const (
 func NewClient(logger types.Logger) *Client {
 	return &Client{
 		logger:  logger,
-		pending: make(map[string]chan *Response),
+		pending: make(map[string]pendingCall),
 	}
 }
 
@@ -679,6 +728,7 @@ func (c *Client) Connect() error {
 	c.conn = conn
 	c.reader = reader
 	c.connected = true
+	c.gen++
 	c.logInfo("已连接到 IPC 服务器")
 
 	// 将读取循环绑定到本次连接，旧连接延迟返回时不能覆盖新连接状态。
@@ -706,6 +756,9 @@ func (c *Client) readLoop(conn net.Conn, reader *bufio.Reader) {
 			}
 			c.connMutex.Unlock()
 			_ = conn.Close()
+			// 必须在关闭连接之后再清理：此后新登记到这条连接上的请求会因写入失败
+			// 自行返回，不会漏在 pending 里等超时。
+			c.failPending(conn)
 			return
 		}
 
@@ -724,14 +777,14 @@ func (c *Client) readLoop(conn net.Conn, reader *bufio.Reader) {
 			if err := json.Unmarshal(line, &resp); err == nil {
 				// 按 RequestID 路由到对应等待者；找不到则说明请求已超时取消，直接丢弃
 				c.pendingMutex.Lock()
-				ch, ok := c.pending[resp.RequestID]
+				call, ok := c.pending[resp.RequestID]
 				if ok {
 					delete(c.pending, resp.RequestID)
 				}
 				c.pendingMutex.Unlock()
 				if ok {
 					// channel 容量 1 + delete 后立即送达，不会阻塞
-					ch <- &resp
+					call.ch <- &resp
 				} else {
 					c.logDebug("收到无主响应，丢弃: requestID=%s", resp.RequestID)
 				}
@@ -756,6 +809,19 @@ func (c *Client) readLoop(conn net.Conn, reader *bufio.Reader) {
 					c.logDebug("客户端事件队列持续拥塞，丢弃关键事件: %s", event.Type)
 				}
 			}
+		}
+	}
+}
+
+// failPending 让登记在 conn 上、仍在等待响应的请求立即以 ErrConnectionClosed 返回。
+// 连接断开后这些响应不可能再到达，不清理的话每个等待者都要白等完整的超时。
+func (c *Client) failPending(conn net.Conn) {
+	c.pendingMutex.Lock()
+	defer c.pendingMutex.Unlock()
+	for id, call := range c.pending {
+		if call.conn == conn {
+			delete(c.pending, id)
+			close(call.ch)
 		}
 	}
 }
@@ -797,15 +863,24 @@ func (c *Client) SendRequest(reqType RequestType, data any) (*Response, error) {
 }
 
 func (c *Client) SendRequestWithTimeout(reqType RequestType, data any, timeout time.Duration) (*Response, error) {
+	resp, _, err := c.SendRequestTracked(reqType, data, timeout)
+	return resp, err
+}
+
+// SendRequestTracked 与 SendRequestWithTimeout 相同，额外返回本次请求实际使用的连接代号
+// （未连接时为 0）。请求失败后需要拆连接的调用方应以该代号调用 CloseGeneration：
+// 直接 Close() 关掉的是"当前"连接，而它可能是失败期间别处已经重连成功的新连接。
+func (c *Client) SendRequestTracked(reqType RequestType, data any, timeout time.Duration) (*Response, uint64, error) {
 	if timeout <= 0 {
 		timeout = defaultRequestTimeout
 	}
 	c.connMutex.RLock()
 	if !c.connected || c.conn == nil {
 		c.connMutex.RUnlock()
-		return nil, fmt.Errorf("未连接到服务器")
+		return nil, 0, fmt.Errorf("未连接到服务器")
 	}
 	conn := c.conn
+	gen := c.gen
 	c.connMutex.RUnlock()
 
 	var dataBytes json.RawMessage
@@ -813,7 +888,7 @@ func (c *Client) SendRequestWithTimeout(reqType RequestType, data any, timeout t
 		var err error
 		dataBytes, err = json.Marshal(data)
 		if err != nil {
-			return nil, fmt.Errorf("序列化请求数据失败: %v", err)
+			return nil, gen, fmt.Errorf("序列化请求数据失败: %v", err)
 		}
 	}
 
@@ -828,12 +903,12 @@ func (c *Client) SendRequestWithTimeout(reqType RequestType, data any, timeout t
 
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("序列化请求失败: %v", err)
+		return nil, gen, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
 	respCh := make(chan *Response, 1)
 	c.pendingMutex.Lock()
-	c.pending[requestID] = respCh
+	c.pending[requestID] = pendingCall{conn: conn, ch: respCh}
 	c.pendingMutex.Unlock()
 
 	// 写入必须带超时。没有 deadline 时，核心侧假死（不再读取管道）会让这次写入
@@ -854,21 +929,25 @@ func (c *Client) SendRequestWithTimeout(reqType RequestType, data any, timeout t
 		// （go-winio）返回的是它自己的 ErrTimeout，只有 net.Error.Timeout() 能统一识别。
 		if isTimeoutError(err) {
 			c.invalidateConn(conn)
-			return nil, fmt.Errorf("%w: request=%s 发送超时", ErrRequestTimeout, reqType)
+			return nil, gen, fmt.Errorf("%w: request=%s 发送超时", ErrRequestTimeout, reqType)
 		}
-		return nil, fmt.Errorf("发送请求失败: %v", err)
+		return nil, gen, fmt.Errorf("发送请求失败: %v", err)
 	}
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case resp := <-respCh:
-		return resp, nil
+	case resp, ok := <-respCh:
+		if !ok {
+			// readLoop 在连接断开时关闭了 channel，响应不会再来了。
+			return nil, gen, fmt.Errorf("%w: request=%s", ErrConnectionClosed, reqType)
+		}
+		return resp, gen, nil
 	case <-timer.C:
 		c.pendingMutex.Lock()
 		delete(c.pending, requestID)
 		c.pendingMutex.Unlock()
-		return nil, fmt.Errorf("%w: request=%s, timeout=%s", ErrRequestTimeout, reqType, timeout)
+		return nil, gen, fmt.Errorf("%w: request=%s, timeout=%s", ErrRequestTimeout, reqType, timeout)
 	}
 }
 
@@ -894,6 +973,24 @@ func (c *Client) invalidateConn(conn net.Conn) {
 	if stale {
 		_ = conn.Close()
 	}
+}
+
+// CloseGeneration 仅当当前连接仍是 gen 代时才关闭它，返回是否确实关闭。
+// 用于"某次请求失败后拆掉它所在的连接"：那条连接若已被替换，就什么都不做。
+func (c *Client) CloseGeneration(gen uint64) bool {
+	c.connMutex.Lock()
+	conn := c.conn
+	if gen == 0 || c.gen != gen || conn == nil {
+		c.connMutex.Unlock()
+		return false
+	}
+	c.connected = false
+	c.conn = nil
+	c.reader = nil
+	c.connMutex.Unlock()
+
+	_ = conn.Close()
+	return true
 }
 
 // Close 关闭连接
