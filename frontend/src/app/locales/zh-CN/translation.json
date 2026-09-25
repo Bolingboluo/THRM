@@ -128,8 +128,13 @@
       "good": "良好"
     },
     "tempGauge": {
-      "loading": "读取中…",
-      "monitoringDisabled": "已停用监测"
+      "loading": "读取中…"
+    },
+    "gpuAbsent": {
+      "hint": "未检测到 GPU 温度",
+      "action": "停用 GPU 监测",
+      "actionTooltip": "没有找到带温度传感器的显卡。没有独显、或核显不提供温度的电脑可以停用 GPU 监测，控温改为只看 CPU，首页也不再显示这张卡片。",
+      "disabledHint": "首页已隐藏 GPU 卡片。如需恢复，可在「设置 → 风扇控制 → GPU 基准」中重新打开「监测」。"
     },
     "fan": {
       "targetSummary": "目标 {{target}} · {{gear}}"
@@ -835,7 +840,7 @@
       "gpuMonitoringToggleAria": "开关 GPU 温度监测",
       "gpuMonitoringDisabledToast": "已停用 GPU 温度监测",
       "gpuMonitoringEnabledToast": "已恢复 GPU 温度监测",
-      "gpuMonitoringDisabledHint": "不再轮询 GPU 传感器（混合显卡下可避免独显被持续唤醒），控温基准仅使用 CPU 温度。",
+      "gpuMonitoringDisabledHint": "不再轮询 GPU 传感器（混合显卡下可避免独显被持续唤醒），控温基准仅使用 CPU 温度，首页不再显示 GPU 卡片。",
       "gpuDevice": "显卡设备",
       "gpuDeviceHintDetected": "自动模式当前命中：{{model}}",
       "gpuDeviceHintAuto": "自动模式会优先尝试独显。",

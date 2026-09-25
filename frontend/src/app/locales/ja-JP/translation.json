@@ -128,8 +128,13 @@
       "good": "良好"
     },
     "tempGauge": {
-      "loading": "読み込み中…",
-      "monitoringDisabled": "監視オフ"
+      "loading": "読み込み中…"
+    },
+    "gpuAbsent": {
+      "hint": "GPU 温度が見つかりません",
+      "action": "GPU 監視をオフ",
+      "actionTooltip": "温度センサーを備えたグラフィックスカードが見つかりませんでした。dGPU を搭載していない、または内蔵 GPU が温度を報告しない PC では GPU 監視をオフにできます。制御は CPU 温度のみを使用し、ホーム画面のこのカードも表示しなくなります。",
+      "disabledHint": "ホーム画面の GPU カードを非表示にしました。元に戻すには「設定 → ファン制御 → GPU 基準」で「監視」をオンにしてください。"
     },
     "fan": {
       "targetSummary": "目標 {{target}} · {{gear}}"
@@ -834,7 +839,7 @@
       "gpuMonitoringToggleAria": "GPU 温度監視の切り替え",
       "gpuMonitoringDisabledToast": "GPU 温度監視を無効にしました",
       "gpuMonitoringEnabledToast": "GPU 温度監視を再開しました",
-      "gpuMonitoringDisabledHint": "GPU センサーをポーリングしないため（ハイブリッド GPU 構成で dGPU の常時ウェイクを防止）、制御基準は CPU 温度のみを使用します。",
+      "gpuMonitoringDisabledHint": "GPU センサーをポーリングしないため（ハイブリッド GPU 構成で dGPU の常時ウェイクを防止）、制御基準は CPU 温度のみを使用し、ホーム画面の GPU カードも表示しません。",
       "gpuDevice": "GPU デバイス",
       "gpuDeviceHintDetected": "自動選択されたデバイス: {{model}}",
       "gpuDeviceHintAuto": "自動選択では可能な限り dGPU を優先します。",

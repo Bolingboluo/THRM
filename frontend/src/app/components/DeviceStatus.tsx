@@ -49,6 +49,7 @@ import {
 } from './ui/index';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import clsx from 'clsx';
+import { toast } from 'sonner';
 
 interface DeviceStatusProps {
   isConnected: boolean;
@@ -93,8 +94,8 @@ const HOME_GRID_COLUMNS = 12;
  * 每张卡片在 12 栅格里的默认宽度，保持与原布局一致：
  * 概览与运行详情整行，三张指标卡各占三分之一，曲线与历史 7:5。
  *
- * 这里是"卡片有多宽"的唯一来源：既生成栅格类名，也用来把卡片按视觉行分组，
- * 免得改了宽度却忘了同步进场动画的分行。
+ * 这里（连同下面去掉 GPU 卡片时的变体）是"卡片有多宽"的唯一来源：既生成栅格类名，
+ * 也用来把卡片按视觉行分组，免得改了宽度却忘了同步进场动画的分行。
  */
 const HOME_CARD_COLUMNS: Record<HomeCardId, number> = {
   hero: 12,
@@ -106,10 +107,21 @@ const HOME_CARD_COLUMNS: Record<HomeCardId, number> = {
   history: 5,
 };
 
+/**
+ * 停用 GPU 监测（没有独显、或混合显卡不想唤醒独显）时首页不渲染 GPU 卡片，
+ * 同一行剩下的 CPU 与风扇两张卡各占一半，免得行尾空出三分之一。
+ */
+const HOME_CARD_COLUMNS_WITHOUT_GPU: Record<HomeCardId, number> = {
+  ...HOME_CARD_COLUMNS,
+  cpu: 6,
+  fan: 6,
+};
+
 /** Tailwind 只能扫到字面量类名，所以列数到类名的映射必须逐条写出来。 */
 const HOME_COLUMN_SPAN_CLASS: Record<number, string> = {
   4: 'md:col-span-4',
   5: 'md:col-span-5',
+  6: 'md:col-span-6',
   7: 'md:col-span-7',
   12: 'md:col-span-12',
 };
@@ -195,6 +207,8 @@ function saveHomeCardOrder(order: HomeCardId[]) {
 interface HomeCardShellProps {
   id: HomeCardId;
   title: string;
+  /** 在 12 栅格中占几列，取自 HOME_CARD_COLUMNS 或其去掉 GPU 卡片后的变体。 */
+  columns: number;
   /** 该卡片所在的视觉行与线性序号，决定进场动画的延迟分组。 */
   revealRow: number;
   revealIndex: number;
@@ -219,6 +233,7 @@ interface HomeCardShellProps {
 function HomeCardShell({
   id,
   title,
+  columns,
   revealRow,
   revealIndex,
   sorting,
@@ -241,7 +256,7 @@ function HomeCardShell({
           style={homeRevealStyle(revealRow, revealIndex)}
           className={clsx(
             'relative min-w-0',
-            HOME_COLUMN_SPAN_CLASS[HOME_CARD_COLUMNS[id]],
+            HOME_COLUMN_SPAN_CLASS[columns],
             sorting && 'cursor-grab touch-none rounded-xl ring-2 ring-primary/35',
           )}
         >
@@ -463,21 +478,42 @@ const TempGaugeDisplay = memo(function TempGaugeDisplay({
   temp,
   ready,
   laptopFanRpm = 0,
-  monitoringDisabled = false,
+  unavailableHint,
+  unavailableActionLabel,
+  unavailableActionTooltip,
+  onUnavailableAction,
+  unavailableActionPending = false,
 }: {
   temp: number | undefined;
   /** 后端首次推送有效温度后置为 true；之前显示占位避免误读 0 °C */
   ready: boolean;
   /** 笔记本内置风扇转速（仅 Uniwill/同方机型可读）；0 或不支持时不渲染 */
   laptopFanRpm?: number;
-  /** 用户在设置中停用了该路温度监测（如混合显卡停用 GPU 监测） */
-  monitoringDisabled?: boolean;
+  /** 已确认这一路读不到温度时的说明（如本机没有可读温度的 GPU）；设置后不再显示"读取中…" */
+  unavailableHint?: string;
+  /** 读不到温度时给出的处理入口，例如一键停用这一路监测 */
+  unavailableActionLabel?: string;
+  unavailableActionTooltip?: string;
+  onUnavailableAction?: () => void;
+  unavailableActionPending?: boolean;
 }) {
   const { t } = useTranslation();
 
-  // 用户已停用监测 → 灰色占位 + "已停用监测"，与"读取中"区分开。
-  // 本机风扇转速走 EC 读取、与 GPU 温度监测互不影响，停用后仍照常显示。
-  if (monitoringDisabled) {
+  // 已确认读不到 → 与"读取中…"同样的灰色占位，但写明原因并给出处理按钮，
+  // 免得用户对着一个永远不会结束的"读取中"干等。
+  // 数值区整体是 pointer-events-none（不挡卡片右键菜单），按钮要单独打开指针事件。
+  if (!ready && unavailableHint) {
+    const actionButton = unavailableActionLabel && onUnavailableAction ? (
+      <button
+        type="button"
+        disabled={unavailableActionPending}
+        onClick={onUnavailableAction}
+        className="pointer-events-auto mt-2 rounded-md border border-border/80 bg-background/80 px-2 py-1 text-[11px] font-medium leading-none text-foreground transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {unavailableActionLabel}
+      </button>
+    ) : null;
+
     return (
       <div className="flex h-full w-full max-w-[20rem] min-[1800px]:max-w-[22rem] flex-1 flex-col items-center justify-end">
         <SemiGauge value={0} color="var(--muted-foreground)">
@@ -485,22 +521,13 @@ const TempGaugeDisplay = memo(function TempGaugeDisplay({
             <span className="text-[28px] min-[1800px]:text-[36px] font-bold leading-none tabular-nums tracking-tight text-muted-foreground/70">--</span>
             <span className="text-xs font-medium text-muted-foreground/70">°C</span>
           </div>
-          {laptopFanRpm > 0 ? (
+          <span className="mt-1 text-[11px] leading-none text-muted-foreground">{unavailableHint}</span>
+          {actionButton && unavailableActionTooltip ? (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="mt-1 inline-flex cursor-help items-center text-[11px] leading-none tabular-nums text-muted-foreground">
-                  {laptopFanRpm} RPM
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                {t('deviceStatus.metrics.laptopFanTooltip')}
-              </TooltipContent>
+              <TooltipTrigger asChild>{actionButton}</TooltipTrigger>
+              <TooltipContent className="max-w-72">{unavailableActionTooltip}</TooltipContent>
             </Tooltip>
-          ) : (
-            <span className="mt-1 text-[11px] leading-none text-muted-foreground">
-              {t('deviceStatus.tempGauge.monitoringDisabled')}
-            </span>
-          )}
+          ) : actionButton}
         </SemiGauge>
       </div>
     );
@@ -837,6 +864,9 @@ const TemperatureHistoryPanel = memo(function TemperatureHistoryPanel({
 
 /* ── Main component ── */
 
+/** 桥接正常出数后 GPU 温度传感器清单持续为空多久，才认定本机没有可读温度的 GPU。 */
+const GPU_ABSENT_CONFIRM_DELAY_MS = 8000;
+
 export default function DeviceStatus({
   isConnected,
   deviceProductId,
@@ -972,6 +1002,47 @@ export default function DeviceStatus({
   const tempPushed = (temperature?.updateTime ?? 0) > 0;
   const cpuReady = tempPushed && (temperature?.cpuTemp ?? 0) > 0;
   const gpuReady = tempPushed && (temperature?.gpuTemp ?? 0) > 0;
+  // 没有独显的机器（或混合显卡不想唤醒独显）会在设置里停用 GPU 监测：此后 GPU 读数恒为 0，
+  // 首页与托盘同一规则，不再给 GPU 留卡片和功耗格，而不是摆一个永远读不到数的占位。
+  const gpuMonitoringDisabled = !!(config as any).disableGpuMonitoring;
+  // 监测开着、桥接也正常出数，却没有任何一块 GPU 带温度传感器：多半是没有独显、核显又不报温度
+  // （Linux 上则是没有 NVIDIA 显卡）。这种状态不会自己好转，与其一直"读取中…"，
+  // 不如说明原因并给出一键停用。桥接启动/故障期间 bridgeOk 为 false，那时的空清单不作数。
+  const gpuHasTemperatureSensor =
+    (Array.isArray(temperature?.gpuSensors) && temperature.gpuSensors.length > 0) ||
+    (Array.isArray(temperature?.gpuDevices) &&
+      temperature.gpuDevices.some((device) => Array.isArray(device?.sensors) && device.sensors.length > 0));
+  const gpuLooksAbsent =
+    isConnected && !gpuMonitoringDisabled && tempPushed && temperature?.bridgeOk !== false && !gpuReady && !gpuHasTemperatureSensor;
+  const [gpuAbsentConfirmed, setGpuAbsentConfirmed] = useState(false);
+  const [gpuMonitoringDisabling, setGpuMonitoringDisabling] = useState(false);
+
+  // 持续一段时间仍是这样才下结论，避免桥接刚出第一帧、清单还没填上时就闪一下提示。
+  useEffect(() => {
+    if (!gpuLooksAbsent) {
+      setGpuAbsentConfirmed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setGpuAbsentConfirmed(true), GPU_ABSENT_CONFIRM_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [gpuLooksAbsent]);
+
+  const handleDisableGpuMonitoring = useCallback(async () => {
+    setGpuMonitoringDisabling(true);
+    try {
+      const newCfg = types.AppConfig.createFrom({ ...config, disableGpuMonitoring: true });
+      await apiService.updateConfig(newCfg);
+      onConfigChange(newCfg);
+      // 卡片随即消失，要告诉用户去哪里改回来。
+      toast.info(t('controlPanel.fan.gpuMonitoringDisabledToast'), {
+        description: t('deviceStatus.gpuAbsent.disabledHint'),
+      });
+    } catch (err) {
+      console.error('停用 GPU 监测失败:', err);
+    } finally {
+      setGpuMonitoringDisabling(false);
+    }
+  }, [config, onConfigChange, t]);
   // 参考温度：跟随设置页“控温温度来源”(max/cpu/gpu)，无该路读数时回退到综合最高温。
   const referenceTemp = (() => {
     const source = (((config as any).tempSource as string) || 'max') as 'max' | 'cpu' | 'gpu';
@@ -1099,37 +1170,6 @@ export default function DeviceStatus({
     commitCardOrder([...HOME_CARD_IDS]);
   }, [commitCardOrder]);
 
-  // 右键菜单里的移动按当前顺序整体挪一位，未渲染的卡片不参与。
-  const moveCard = useCallback(
-    (id: HomeCardId, action: 'earlier' | 'later' | 'first' | 'last') => {
-      setCardOrder((previous) => {
-        const from = previous.indexOf(id);
-        if (from < 0) return previous;
-        let to = from;
-        switch (action) {
-          case 'earlier':
-            to = Math.max(0, from - 1);
-            break;
-          case 'later':
-            to = Math.min(previous.length - 1, from + 1);
-            break;
-          case 'first':
-            to = 0;
-            break;
-          case 'last':
-            to = previous.length - 1;
-            break;
-        }
-        if (to === from) return previous;
-        const next = previous.filter((item) => item !== id);
-        next.splice(to, 0, id);
-        saveHomeCardOrder(next);
-        return next;
-      });
-    },
-    [],
-  );
-
   /* ── 首页卡片：顺序由用户拖动/右键菜单决定，条件不满足的卡片渲染为 null ── */
   const homeCards: Record<HomeCardId, React.ReactNode> = {
     hero: (
@@ -1240,7 +1280,7 @@ export default function DeviceStatus({
         <TempGaugeDisplay temp={temperature?.cpuTemp} ready={cpuReady} laptopFanRpm={laptopCpuFanRpm} />
       </div>
     ) : null,
-    gpu: isConnected ? (
+    gpu: isConnected && !gpuMonitoringDisabled ? (
       <div className="glacier-metric-card flex h-full min-h-[155px] flex-col items-center rounded-xl border border-border bg-card px-5 py-3 shadow-sm shadow-black/5 transition-shadow hover:shadow-md hover:shadow-primary/10 md:min-h-[171px] min-[1800px]:min-h-[212px] min-[1800px]:px-7 min-[1800px]:py-5">
         <MetricHeader
           icon={<Gpu className="h-4 w-4" />}
@@ -1250,7 +1290,11 @@ export default function DeviceStatus({
           temp={temperature?.gpuTemp}
           ready={gpuReady}
           laptopFanRpm={laptopGpuFanRpm}
-          monitoringDisabled={!!(config as any).disableGpuMonitoring}
+          unavailableHint={gpuAbsentConfirmed ? t('deviceStatus.gpuAbsent.hint') : undefined}
+          unavailableActionLabel={t('deviceStatus.gpuAbsent.action')}
+          unavailableActionTooltip={t('deviceStatus.gpuAbsent.actionTooltip')}
+          onUnavailableAction={handleDisableGpuMonitoring}
+          unavailableActionPending={gpuMonitoringDisabling}
         />
       </div>
     ) : null,
@@ -1285,10 +1329,14 @@ export default function DeviceStatus({
                 {t('deviceStatus.controlProtection')}
               </h3>
             </div>
-            <HardwareIdentitySummary cpuModel={temperature?.cpuModel} gpuModel={temperature?.gpuModel} />
+            {/* 停用 GPU 监测后核心会清空 gpuModel，但 GUI 合并推送时把空值当"未变化"沿用上一帧，这里要自己挡掉。 */}
+            <HardwareIdentitySummary
+              cpuModel={temperature?.cpuModel}
+              gpuModel={gpuMonitoringDisabled ? undefined : temperature?.gpuModel}
+            />
           </div>
 
-          <div className="grid grid-cols-2 gap-2.5 min-[560px]:grid-cols-5">
+          <div className={clsx('grid grid-cols-2 gap-2.5', gpuMonitoringDisabled ? 'min-[560px]:grid-cols-4' : 'min-[560px]:grid-cols-5')}>
             <div className="glacier-stat-tile rounded-xl border border-border bg-background/55 p-3 min-[1800px]:p-4">
               <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Sparkles className="h-3.5 w-3.5" />
@@ -1344,13 +1392,15 @@ export default function DeviceStatus({
               <div className="text-sm font-semibold tabular-nums">{cpuPowerText}</div>
             </div>
 
-            <div className="glacier-stat-tile rounded-xl border border-border bg-background/55 p-3 min-[1800px]:p-4">
-              <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Activity className="h-3.5 w-3.5" />
-                {t('deviceStatus.stats.gpuPower')}
+            {!gpuMonitoringDisabled && (
+              <div className="glacier-stat-tile rounded-xl border border-border bg-background/55 p-3 min-[1800px]:p-4">
+                <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  {t('deviceStatus.stats.gpuPower')}
+                </div>
+                <div className="text-sm font-semibold tabular-nums">{gpuPowerText}</div>
               </div>
-              <div className="text-sm font-semibold tabular-nums">{gpuPowerText}</div>
-            </div>
+            )}
 
           </div>
 
@@ -1459,6 +1509,43 @@ export default function DeviceStatus({
   );
 
   const visibleCards = cardOrder.filter((id) => homeCards[id] !== null);
+
+  // 右键菜单里的移动按当前顺序整体挪一位，未渲染的卡片不参与：停用 GPU 监测后
+  // GPU 卡片仍留在保存的顺序里，若把它也算一位，"后移一位"可能只是和一张看不见的卡换位，界面毫无变化。
+  const moveCard = useCallback(
+    (id: HomeCardId, action: 'earlier' | 'later' | 'first' | 'last') => {
+      setCardOrder((previous) => {
+        const visible = previous.filter((item) => visibleCards.includes(item));
+        const from = visible.indexOf(id);
+        if (from < 0) return previous;
+        let to = from;
+        switch (action) {
+          case 'earlier':
+            to = Math.max(0, from - 1);
+            break;
+          case 'later':
+            to = Math.min(visible.length - 1, from + 1);
+            break;
+          case 'first':
+            to = 0;
+            break;
+          case 'last':
+            to = visible.length - 1;
+            break;
+        }
+        if (to === from) return previous;
+        // 与拖拽结束时同一套落位规则：前移放到目标卡之前，后移放到目标卡之后。
+        const targetId = visible[to];
+        const next = previous.filter((item) => item !== id);
+        next.splice(next.indexOf(targetId) + (to > from ? 1 : 0), 0, id);
+        saveHomeCardOrder(next);
+        return next;
+      });
+    },
+    [visibleCards],
+  );
+
+  const cardColumns = gpuMonitoringDisabled ? HOME_CARD_COLUMNS_WITHOUT_GPU : HOME_CARD_COLUMNS;
   // 三条引导都不显示时不要留一个空的栅格项，否则概览卡下面会多出一段空行。
   const showConnectionGuides =
     !isConnected || !!coreServiceError || (tempPushed && referenceTemp <= 0) || bridgeWarningReady;
@@ -1475,8 +1562,8 @@ export default function DeviceStatus({
   }, [visibleCards, showConnectionGuides]);
 
   const gridSlotRows = useMemo(
-    () => homeGridRowIndexes(gridSlots.map((slot) => (slot.id === null ? HOME_GRID_COLUMNS : HOME_CARD_COLUMNS[slot.id]))),
-    [gridSlots],
+    () => homeGridRowIndexes(gridSlots.map((slot) => (slot.id === null ? HOME_GRID_COLUMNS : cardColumns[slot.id]))),
+    [gridSlots, cardColumns],
   );
 
   return (
@@ -1508,6 +1595,7 @@ export default function DeviceStatus({
               key={slot.id}
               id={slot.id}
               title={t(`deviceStatus.layout.cards.${slot.id}`)}
+              columns={cardColumns[slot.id]}
               revealRow={row}
               revealIndex={slotIndex}
               sorting={sortingActive}

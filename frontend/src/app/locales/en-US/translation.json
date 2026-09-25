@@ -128,8 +128,13 @@
       "good": "Good"
     },
     "tempGauge": {
-      "loading": "Reading...",
-      "monitoringDisabled": "Monitoring off"
+      "loading": "Reading..."
+    },
+    "gpuAbsent": {
+      "hint": "No GPU temperature found",
+      "action": "Turn off GPU monitoring",
+      "actionTooltip": "No graphics card with a temperature sensor was found. On PCs without a discrete GPU, or whose integrated GPU reports no temperature, you can turn off GPU monitoring: fan control then uses CPU temperature only and this card is hidden from the home page.",
+      "disabledHint": "The GPU card is now hidden from the home page. To bring it back, turn \"Monitor\" back on under Settings → Fan control → GPU baseline."
     },
     "fan": {
       "targetSummary": "Target {{target}} · {{gear}}"
@@ -835,7 +840,7 @@
       "gpuMonitoringToggleAria": "Toggle GPU temperature monitoring",
       "gpuMonitoringDisabledToast": "GPU temperature monitoring disabled",
       "gpuMonitoringEnabledToast": "GPU temperature monitoring restored",
-      "gpuMonitoringDisabledHint": "GPU sensors are no longer polled (prevents the discrete GPU from being kept awake on hybrid laptops); the control baseline uses CPU temperature only.",
+      "gpuMonitoringDisabledHint": "GPU sensors are no longer polled (prevents the discrete GPU from being kept awake on hybrid laptops); the control baseline uses CPU temperature only, and the GPU card is hidden from the home page.",
       "gpuDevice": "GPU device",
       "gpuDeviceHintDetected": "Auto mode currently matched: {{model}}",
       "gpuDeviceHintAuto": "Auto mode will prefer the discrete GPU when possible.",
