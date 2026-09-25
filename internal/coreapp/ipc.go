@@ -305,27 +305,11 @@ func (a *CoreApp) handleIPCRequest(req ipc.Request) ipc.Response {
 		return a.successResponse(true)
 
 	case ipc.ReqTestTemperatureReading:
-		cfg := a.configManager.Get()
-		temp := a.tempReader.Read(types.TemperatureSelection{
-			TempSource:      cfg.TempSource,
-			GpuDevice:       cfg.GpuDevice,
-			CpuSensor:       cfg.CpuSensor,
-			GpuSensor:       cfg.GpuSensor,
-			DisableGpu:      cfg.DisableGpuMonitoring,
-			ExtendedSensors: a.extendedSensorsActive(),
-		})
+		temp := a.tempReader.Read(a.temperatureSelection(a.configManager.Get()))
 		return a.dataResponse(temp)
 
 	case ipc.ReqTestBridgeProgram:
-		cfg := a.configManager.Get()
-		data := a.bridgeManager.GetTemperature(types.TemperatureSelection{
-			TempSource:      cfg.TempSource,
-			GpuDevice:       cfg.GpuDevice,
-			CpuSensor:       cfg.CpuSensor,
-			GpuSensor:       cfg.GpuSensor,
-			DisableGpu:      cfg.DisableGpuMonitoring,
-			ExtendedSensors: a.extendedSensorsActive(),
-		})
+		data := a.bridgeManager.GetTemperature(a.temperatureSelection(a.configManager.Get()))
 		return a.dataResponse(data)
 
 	case ipc.ReqGetBridgeProgramStatus:

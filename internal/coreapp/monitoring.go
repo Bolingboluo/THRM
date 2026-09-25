@@ -81,6 +81,20 @@ func shouldRestartTemperatureBridge(temp types.TemperatureData) bool {
 	return temp.CPUTemp == 0 && temp.GPUTemp == 0
 }
 
+// temperatureSelection 由配置构造温度读取选择。控温循环与各种"测试读取"都必须走这里，
+// 否则测试看到的 CPU/控制温度会和循环实际使用的不一致（例如漏掉多传感器平均）。
+func (a *CoreApp) temperatureSelection(cfg types.AppConfig) types.TemperatureSelection {
+	return types.TemperatureSelection{
+		TempSource:      cfg.TempSource,
+		GpuDevice:       cfg.GpuDevice,
+		CpuSensor:       cfg.CpuSensor,
+		CpuSensors:      cfg.CpuSensors,
+		GpuSensor:       cfg.GpuSensor,
+		DisableGpu:      cfg.DisableGpuMonitoring,
+		ExtendedSensors: a.extendedSensorsActive(),
+	}
+}
+
 // nextTemperatureEMA 计算窗口为 n 的温度 EMA（α = 2/(n+1)）。
 //
 // 必须用浮点累积：整数除法向下取整，升温时每步都被截掉一点，最终稳定在真实温度之下
@@ -125,9 +139,8 @@ func compactTemperatureEventPayload(current, previous types.TemperatureData) typ
 	if gpuDevicesEqual(current.GpuDevices, previous.GpuDevices) {
 		compact.GpuDevices = nil
 	}
-	if temperatureSensorsEqual(current.OtherSensors, previous.OtherSensors) {
-		compact.OtherSensors = nil
-	}
+	// OtherSensors 不做差分：它带 omitempty，空切片同样会被省略，GUI 无法区分"未变"与
+	// "已清空"（关掉扩展传感器后会一直显示旧读数）。它只在散热收益测试期间存在，原样发送代价很小。
 	return compact
 }
 
@@ -270,16 +283,7 @@ func (a *CoreApp) startTemperatureMonitoring() {
 	rawTempHistory := make([]int, 0, 6)
 	recentAvgTemps := make([]int, 0, 24)
 	recentControlTemps := make([]int, 0, 24)
-	initialSelection := types.TemperatureSelection{
-		TempSource:      cfg.TempSource,
-		GpuDevice:       cfg.GpuDevice,
-		CpuSensor:       cfg.CpuSensor,
-		CpuSensors:      cfg.CpuSensors,
-		GpuSensor:       cfg.GpuSensor,
-		DisableGpu:      cfg.DisableGpuMonitoring,
-		ExtendedSensors: a.extendedSensorsActive(),
-	}
-	initialTemp := a.tempReader.Read(initialSelection)
+	initialTemp := a.tempReader.Read(a.temperatureSelection(cfg))
 	if initialTemp.ControlTemp > 0 {
 		rawTempHistory = append(rawTempHistory, initialTemp.ControlTemp)
 	}
@@ -363,18 +367,11 @@ monitorLoop:
 			}
 			// 扩展传感器只为散热收益测试临时开启，而测试跑在 GUI 里。
 			a.releaseExtendedSensorsIfIdle(hasClients)
+			// 刚有 GUI 连上：它没收到过上一帧，差分掉的传感器清单对它来说就是缺失。
+			clientsJustConnected := hasClients && !prevHasClients
 			prevHasClients = hasClients
 
-			selection := types.TemperatureSelection{
-				TempSource:      cfg.TempSource,
-				GpuDevice:       cfg.GpuDevice,
-				CpuSensor:       cfg.CpuSensor,
-				CpuSensors:      cfg.CpuSensors,
-				GpuSensor:       cfg.GpuSensor,
-				DisableGpu:      cfg.DisableGpuMonitoring,
-				ExtendedSensors: a.extendedSensorsActive(),
-			}
-			temp := a.tempReader.Read(selection)
+			temp := a.tempReader.Read(a.temperatureSelection(cfg))
 			// 补充笔记本内置风扇转速（机械革命等 Uniwill/同方准系统），不支持时保持 0。
 			if laptopSpeeds, ok := a.laptopFanReader.Read(); ok {
 				temp.CPUFanRPM = laptopSpeeds.CPUFanRPM
@@ -432,7 +429,10 @@ monitorLoop:
 
 			// 广播温度更新（无 GUI 客户端时跳过差分与序列化，核心常驻后台时显著降低每秒开销）
 			if hasClients {
-				eventTemp := compactTemperatureEventPayload(temp, previousTemp)
+				eventTemp := temp
+				if !clientsJustConnected {
+					eventTemp = compactTemperatureEventPayload(temp, previousTemp)
+				}
 				a.ipcServer.BroadcastEvent(ipc.EventTemperatureUpdate, eventTemp)
 				if recorded {
 					a.ipcServer.BroadcastEvent(ipc.EventTemperatureHistoryUpdate, historyPoint)
