@@ -82,6 +82,10 @@ type Manager struct {
 	// 不再创建 systray 实例；重新打开时经 enableCh 唤醒它重新注册图标。
 	disabled int32         // atomic: 1=用户已关闭托盘
 	enableCh chan struct{} // 容量 1 的唤醒信号
+
+	// lastTooltip 是最近一次按真实状态渲染的悬浮提示（string）。图标刷新必须原样恢复它：
+	// 状态轮询只在状态变化时才重写提示，刷新若换成通用文案，真实状态会一直丢到下次变化。
+	lastTooltip atomic.Value
 }
 
 // MenuItems 托盘菜单项结构
@@ -181,6 +185,31 @@ func formatTooltipReadings(status Status) []string {
 		lines = append(lines, fmt.Sprintf("风扇 %d RPM", status.CurrentRPM))
 	}
 	return lines
+}
+
+// statusTooltip 按设备状态生成悬浮提示。
+func statusTooltip(status Status) string {
+	if !status.Connected {
+		return appmeta.AppName + " - 设备未连接"
+	}
+	if status.AutoControlState {
+		return buildTrayTooltip(appmeta.AppName+" - 智能变频中", formatTooltipReadings(status))
+	}
+	return buildTrayTooltip(appmeta.AppName+" - 手动模式", formatTooltipReadings(status))
+}
+
+// setTooltip 设置悬浮提示并记住它，供图标刷新时原样恢复。只能在 UI 队列中调用。
+func (m *Manager) setTooltip(text string) {
+	m.lastTooltip.Store(text)
+	systray.SetTooltip(text)
+}
+
+// currentTooltip 返回最近一次渲染的悬浮提示；尚未渲染过真实状态时退回通用文案。
+func (m *Manager) currentTooltip() string {
+	if text, ok := m.lastTooltip.Load().(string); ok && text != "" {
+		return text
+	}
+	return appmeta.AppName + " - 运行中"
 }
 
 func statusEqual(left, right Status) bool {
@@ -857,15 +886,7 @@ func (m *Manager) updateMenuStatus(instanceDone <-chan struct{}) {
 					m.menuItems.AutoControl.Uncheck()
 				}
 
-				if status.Connected {
-					if status.AutoControlState {
-						systray.SetTooltip(buildTrayTooltip(appmeta.AppName+" - 智能变频中", formatTooltipReadings(status)))
-					} else {
-						systray.SetTooltip(buildTrayTooltip(appmeta.AppName+" - 手动模式", formatTooltipReadings(status)))
-					}
-				} else {
-					systray.SetTooltip(appmeta.AppName + " - 设备未连接")
-				}
+				m.setTooltip(statusTooltip(status))
 			}) {
 				previousStatus = status
 				hasPreviousStatus = true
@@ -933,7 +954,7 @@ func (m *Manager) refreshTrayIcon() {
 		}
 
 		systray.SetIcon(m.iconData)
-		systray.SetTooltip(appmeta.AppName + " - 运行中")
+		systray.SetTooltip(m.currentTooltip())
 
 		m.consecutiveFails.Store(0)
 		m.lastIconRefresh.Store(time.Now().Unix())

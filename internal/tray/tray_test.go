@@ -295,3 +295,25 @@ func TestStatusEqualDetectsPowerChanges(t *testing.T) {
 		t.Error("GPU 监测开关变化应当触发托盘刷新")
 	}
 }
+
+// 图标刷新（30 秒健康检查、唤醒、通知区域重建）必须恢复最近一次的真实状态提示。
+// 状态轮询只在状态变化时才重写提示，刷新若改回通用文案，真实状态会一直丢到下次变化。
+func TestIconRefreshKeepsLastStatusTooltip(t *testing.T) {
+	m := &Manager{}
+	if got := m.currentTooltip(); !strings.Contains(got, "运行中") {
+		t.Fatalf("尚未渲染状态时应退回通用提示: %q", got)
+	}
+
+	want := statusTooltip(Status{Connected: true, AutoControlState: true, CPUTemp: 70, GPUTemp: 60, CurrentRPM: 2000})
+	m.lastTooltip.Store(want)
+	if got := m.currentTooltip(); got != want {
+		t.Fatalf("刷新时应恢复最近一次的状态提示 %q，得到 %q", want, got)
+	}
+
+	if got := statusTooltip(Status{}); !strings.Contains(got, "设备未连接") {
+		t.Fatalf("未连接时提示应说明设备未连接: %q", got)
+	}
+	if got := statusTooltip(Status{Connected: true, CPUTemp: 70}); !strings.Contains(got, "手动模式") {
+		t.Fatalf("手动模式提示缺失: %q", got)
+	}
+}
