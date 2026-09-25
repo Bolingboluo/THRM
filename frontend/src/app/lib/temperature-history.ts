@@ -202,6 +202,9 @@ export const appendHistoryPoint = (
   return start > 0 ? next.slice(start) : next;
 };
 
+// 新点比最新记录早超过该值即视为系统时钟回拨。
+const HISTORY_CLOCK_ROLLBACK_TOLERANCE_MS = 60 * 1000;
+
 export const appendSampledHistoryPoint = (
   points: TemperatureHistoryPoint[],
   point: TemperatureHistoryPoint | null,
@@ -212,8 +215,20 @@ export const appendSampledHistoryPoint = (
 
   const last = points[points.length - 1];
   const minIntervalMs = options?.minIntervalMs ?? HISTORY_SAMPLE_INTERVAL_MS;
-  if (last && normalized.timestamp-last.timestamp < minIntervalMs) {
-    return points;
+  if (last) {
+    const gap = normalized.timestamp - last.timestamp;
+    // 系统时钟回拨（NTP 校时、双系统 RTC）后新点早于已有记录。负间隔也按"太快"丢弃的话，
+    // 记录会一直停到墙钟追上旧的最新时间；丢掉落在"未来"的点再接着记，与核心侧一致。
+    if (gap < -HISTORY_CLOCK_ROLLBACK_TOLERANCE_MS) {
+      return appendHistoryPoint(
+        points.filter((item) => item.timestamp <= normalized.timestamp),
+        normalized,
+        options,
+      );
+    }
+    if (gap < minIntervalMs) {
+      return points;
+    }
   }
 
   return appendHistoryPoint(points, normalized, options);
