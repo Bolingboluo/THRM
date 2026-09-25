@@ -219,6 +219,13 @@ func (a *CoreApp) ResetLearnedOffsets() error {
 
 // SetAutoControl 设置智能变频
 func (a *CoreApp) SetAutoControl(enabled bool) error {
+	return a.setAutoControl(enabled, true)
+}
+
+// setAutoControl 关闭智能变频时，applyGear 决定是否异步恢复设备当前挡位。
+// 调用方紧接着就要设置新挡位时必须传 false：否则两次写入同时抢设备锁，
+// 旧挡位可能后落地，配置和通知显示新挡位而设备仍在旧挡位。
+func (a *CoreApp) setAutoControl(enabled, applyGear bool) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -232,10 +239,12 @@ func (a *CoreApp) SetAutoControl(enabled bool) error {
 	cfg.AutoControl = enabled
 
 	if enabled {
+		a.deviceModeMu.Lock()
 		a.userSetAutoControl = true
+		a.deviceModeMu.Unlock()
 	}
 
-	if !enabled && a.isConnected {
+	if !enabled && applyGear && a.isConnected {
 		a.safeGo("applyCurrentGearSetting", func() {
 			a.applyCurrentGearSetting()
 		})
@@ -270,6 +279,11 @@ func (a *CoreApp) applyCurrentGearSetting() {
 	level := a.getRememberedManualLevel(setGear, cfg.ManualLevel)
 	rpm := cfg.ResolveGearRPM(setGear, level)
 
+	// 与其它写入一样经过挂起屏障，也和正在进行的控温写入串行。
+	if !a.lockDeviceControlIfReady() {
+		return
+	}
+	defer a.deviceControlMutex.Unlock()
 	a.logInfo("应用当前挡位设置: %s %s (%d RPM)", setGear, level, rpm)
 	a.deviceManager.SetManualGearRPM(setGear, level, rpm)
 }
@@ -350,19 +364,16 @@ func (a *CoreApp) SetCustomSpeed(enabled bool, rpm int) error {
 				return fmt.Errorf("恢复手动挡位失败")
 			}
 		}
+		// 仍持有设备控制锁时就提交内存配置：等在这把锁上的控温周期拿到锁后会复查
+		// AutoControl，配置若还没改，它会用实时转速把刚设置的自定义转速覆盖掉。
+		a.commitCustomSpeedConfig(enabled, rpm)
 		a.deviceControlMutex.Unlock()
+	} else {
+		a.commitCustomSpeedConfig(enabled, rpm)
 	}
 
 	a.mutex.Lock()
 	latestCfg := a.configManager.Get()
-	if enabled {
-		latestCfg.AutoControl = false
-		latestCfg.CustomSpeedEnabled = true
-		latestCfg.CustomSpeedRPM = rpm
-	} else {
-		latestCfg.CustomSpeedEnabled = false
-	}
-	a.configManager.Set(latestCfg)
 	err := a.configManager.Save()
 	a.mutex.Unlock()
 
@@ -371,6 +382,22 @@ func (a *CoreApp) SetCustomSpeed(enabled bool, rpm int) error {
 	}
 
 	return err
+}
+
+// commitCustomSpeedConfig 只改写自定义转速相关字段（不落盘）。
+func (a *CoreApp) commitCustomSpeedConfig(enabled bool, rpm int) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.configManager.Mutate(func(cfg *types.AppConfig) bool {
+		if enabled {
+			cfg.AutoControl = false
+			cfg.CustomSpeedEnabled = true
+			cfg.CustomSpeedRPM = rpm
+		} else {
+			cfg.CustomSpeedEnabled = false
+		}
+		return true
+	})
 }
 
 // SetGearLight 设置挡位灯
@@ -600,12 +627,17 @@ func (a *CoreApp) persistWindowsAutoStart(enable bool) {
 
 // GetDebugInfo 获取调试信息
 func (a *CoreApp) GetDebugInfo() map[string]any {
+	a.mutex.RLock()
+	debugMode := a.debugMode
+	isConnected := a.isConnected
+	a.mutex.RUnlock()
+
 	info := map[string]any{
-		"debugMode":               a.debugMode,
+		"debugMode":               debugMode,
 		"trayReady":               a.trayManager.IsReady(),
 		"trayInitialized":         a.trayManager.IsInitialized(),
 		"trayEnabled":             a.trayManager.IsEnabled(),
-		"isConnected":             a.isConnected,
+		"isConnected":             isConnected,
 		"autoReconnectSuppressed": a.autoReconnectSuppressed.Load(),
 		"legionFnQSupported":      a.legionFnQSupported.Load(),
 		"guiLastResponse":         time.Unix(atomic.LoadInt64(&a.guiLastResponse), 0).Format("2006-01-02 15:04:05"),
@@ -656,7 +688,10 @@ func (a *CoreApp) SetDebugMode(enabled bool) error {
 }
 
 func (a *CoreApp) SendDeviceDebugCommand(hexCommand string, waitMs int) (types.DeviceDebugCommandResult, error) {
-	if !a.debugMode {
+	a.mutex.RLock()
+	debugMode := a.debugMode
+	a.mutex.RUnlock()
+	if !debugMode {
 		return types.DeviceDebugCommandResult{}, fmt.Errorf("请先开启调试模式")
 	}
 	return a.deviceManager.SendDebugCommand(hexCommand, waitMs)

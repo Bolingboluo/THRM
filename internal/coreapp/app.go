@@ -56,7 +56,10 @@ type CoreApp struct {
 	deviceSettings       *types.DeviceSettings
 	// lastSmartLightStatus 用于去重智能温控灯效状态广播：温度每秒都在采样，
 	// 但只有真正换了温度区间才值得推送一次事件。
-	lastSmartLightStatus    types.SmartTempLightStatus
+	lastSmartLightStatus types.SmartTempLightStatus
+	// deviceModeMu 保护 lastDeviceMode 与 userSetAutoControl。它们在 HID 读协程的回调里
+	// 读写，不能用 a.mutex：那把锁可能被持有者拿着去等设备锁，进而卡住读协程。
+	deviceModeMu            sync.Mutex
 	lastDeviceMode          string
 	userSetAutoControl      bool
 	isAutoStartLaunch       bool
@@ -66,8 +69,10 @@ type CoreApp struct {
 	legionFnQRegistered     atomic.Bool
 	reconnectInProgress     atomic.Bool
 	// startupConfigApplied 标记"本进程已经把 App 配置整体下发过一次"。
-	startupConfigApplied atomic.Bool
+	startupConfigApplied    atomic.Bool
 	autoReconnectSuppressed atomic.Bool
+	// suppressedBeforeSuspend 记录挂起前的 autoReconnectSuppressed，唤醒时据此恢复。
+	suppressedBeforeSuspend atomic.Bool
 	resumeRecoveryRunning   atomic.Bool
 	systemSuspended         atomic.Bool
 	resumeReconnectWanted   atomic.Bool

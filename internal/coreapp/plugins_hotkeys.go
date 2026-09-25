@@ -159,7 +159,10 @@ func (a *CoreApp) applyLegionFnQFanMapping(state fnqpowermode.PowerModeState) {
 	if !cfg.LegionFnQ.Enabled || !cfg.LegionFnQ.TakeOverFan {
 		return
 	}
-	if !a.isConnected {
+	a.mutex.RLock()
+	connected := a.isConnected
+	a.mutex.RUnlock()
+	if !connected {
 		a.logDebug("Lenovo Legion Fn+Q takeover skipped: device not connected")
 		return
 	}
@@ -370,7 +373,8 @@ func (a *CoreApp) toggleManualGearByHotkey() (string, error) {
 	cfg := a.configManager.Get()
 
 	if cfg.AutoControl {
-		if err := a.SetAutoControl(false); err != nil {
+		// 下面马上会下发新挡位，不能再让 SetAutoControl 异步恢复旧挡位与之竞争。
+		if err := a.setAutoControl(false, false); err != nil {
 			return "", fmt.Errorf("切换到手动模式失败: %w", err)
 		}
 	}

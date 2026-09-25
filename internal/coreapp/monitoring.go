@@ -823,8 +823,11 @@ func (a *CoreApp) performHealthCheck() {
 	// 散热器重新配对或换用另一台设备会产生新的设备节点，这里持续补齐兼容处理。
 	a.ensureFlydigiCompat("health-check")
 
+	a.mutex.RLock()
+	connected := a.isConnected
+	a.mutex.RUnlock()
 	a.logDebug("健康检查完成 - 托盘:%v 设备连接:%v",
-		a.trayManager.IsInitialized(), a.isConnected)
+		a.trayManager.IsInitialized(), connected)
 }
 
 func (a *CoreApp) ensureTemperatureMonitoringHealthy() {

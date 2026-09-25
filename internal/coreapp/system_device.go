@@ -74,55 +74,80 @@ func (a *CoreApp) onFanDataUpdate(fanData *types.FanData) {
 		return
 	}
 
+	// 本回调运行在 HID 读协程上，任何阻塞都会让读协程收不到正在等待的命令 ACK，
+	// 发送方只能等到超时失败。因此这里不调用会拿设备锁的 IsConnected（设备层刚确认过
+	// 连接有效），不拿 a.mutex 写锁，也不深拷贝配置；只有真正检测到模式切换这种罕见情况，
+	// 才把读配置、落盘和广播交给后台协程。
+	//
 	// A newly opened HID handle can deliver the device's default gear-mode
 	// report before the connection has passed its readiness gate. Do not treat
 	// that bootstrap report as a user-requested mode transition.
-	controlReady := a.isDeviceControlReady()
+	a.mutex.RLock()
+	coreConnected := a.isConnected
+	a.mutex.RUnlock()
+	controlReady := automaticControlAllowed(a.stopping.Load(), a.systemSuspended.Load(), coreConnected, true)
 	if controlReady && a.rtssPublisher != nil {
 		a.rtssPublisher.Publish(fanData.CurrentRPM)
 	}
-	a.mutex.Lock()
-	cfg := a.configManager.Get()
+
+	a.deviceModeMu.Lock()
 	deviceSwitchedToManual := didDeviceSwitchToManualMode(a.lastDeviceMode, fanData.WorkMode)
-
-	// 检查工作模式变化
-	// 如果开启了"断连保持配置模式"，则忽略设备状态变化，避免误判
-	if deviceSwitchedToManual &&
-		controlReady &&
-		cfg.AutoControl &&
-		!a.userSetAutoControl &&
-		!cfg.IgnoreDeviceOnReconnect {
-
-		a.logInfo("检测到设备切换到挡位工作模式，自动关闭智能变频")
-		cfg.AutoControl = false
-
-		a.configManager.Set(cfg)
-		a.configManager.Save()
-
-		// 广播配置更新
-		if a.ipcServer != nil {
-			a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, cfg)
-		}
-	} else if deviceSwitchedToManual &&
-		controlReady &&
-		cfg.AutoControl &&
-		!a.userSetAutoControl &&
-		cfg.IgnoreDeviceOnReconnect {
-		a.logInfo("检测到设备模式变化，但已开启断连保持配置模式，保持APP配置不变")
-	}
-
+	userSetAutoControl := a.userSetAutoControl
 	a.lastDeviceMode = fanData.WorkMode
+	a.userSetAutoControl = false
+	a.deviceModeMu.Unlock()
 
-	if a.userSetAutoControl {
-		a.userSetAutoControl = false
+	if deviceSwitchedToManual && controlReady && !userSetAutoControl {
+		a.safeGo("device-switched-to-manual", a.handleDeviceSwitchedToManual)
 	}
-
-	a.mutex.Unlock()
 
 	// 广播风扇数据更新
 	if a.ipcServer != nil {
 		a.ipcServer.BroadcastEvent(ipc.EventFanDataUpdate, fanData)
 	}
+}
+
+// handleDeviceSwitchedToManual 处理用户在设备上按键切回挡位模式。
+// 如果开启了"断连保持配置模式"，则忽略设备状态变化，避免误判。
+func (a *CoreApp) handleDeviceSwitchedToManual() {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	ignoreDevice := false
+	cfg, changed := a.configManager.Mutate(func(cfg *types.AppConfig) bool {
+		if !cfg.AutoControl {
+			return false
+		}
+		if cfg.IgnoreDeviceOnReconnect {
+			ignoreDevice = true
+			return false
+		}
+		cfg.AutoControl = false
+		return true
+	})
+	if ignoreDevice {
+		a.logInfo("检测到设备模式变化，但已开启断连保持配置模式，保持APP配置不变")
+		return
+	}
+	if !changed {
+		return
+	}
+
+	a.logInfo("检测到设备切换到挡位工作模式，自动关闭智能变频")
+	if err := a.configManager.Save(); err != nil {
+		a.logError("保存配置失败: %v", err)
+	}
+	if a.ipcServer != nil {
+		a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, cfg)
+	}
+}
+
+// resetDeviceModeTracking 在连接失效时清空上一次的设备工作模式：
+// 否则重连后的首个挡位模式上报会被拿去和旧连接的"实时转速模式"比较，被误判为用户手动切挡。
+func (a *CoreApp) resetDeviceModeTracking() {
+	a.deviceModeMu.Lock()
+	a.lastDeviceMode = ""
+	a.deviceModeMu.Unlock()
 }
 
 // onDeviceDisconnect 设备断开回调
@@ -136,6 +161,7 @@ func (a *CoreApp) onDeviceDisconnect() {
 	a.isConnected = false
 	a.deviceSettings = nil
 	a.mutex.Unlock()
+	a.resetDeviceModeTracking()
 
 	if wasConnected {
 		a.logInfo("设备连接已断开，将在健康检查时尝试自动重连")
@@ -414,6 +440,7 @@ func (a *CoreApp) onSystemSuspend() {
 	))
 	a.cancelReconnect()
 	a.connectGeneration.Add(1)
+	a.suppressedBeforeSuspend.Store(a.autoReconnectSuppressed.Load())
 	a.autoReconnectSuppressed.Store(true)
 	// Make the core connection state unavailable before any asynchronous
 	// cleanup starts. A monitor tick that races with the suspend callback will
@@ -422,6 +449,7 @@ func (a *CoreApp) onSystemSuspend() {
 	a.isConnected = false
 	a.deviceSettings = nil
 	a.mutex.Unlock()
+	a.resetDeviceModeTracking()
 	// Wait for an in-flight automatic/configuration write to finish. New writes
 	// are blocked by systemSuspended above, so the suspend power-off/disconnect
 	// sequence cannot be followed by a stale realtime RPM write.
@@ -563,9 +591,10 @@ func (a *CoreApp) handleSystemResume(source string, gap time.Duration, forceReco
 
 	// 主动挂起时温度监控已停止，唤醒后需重新启动（与设备连接解耦）。
 	if proactivelySuspended {
-		if resumeReconnectWanted {
-			a.autoReconnectSuppressed.Store(false)
-		}
+		// 挂起时置位抑制只是为了挡住休眠期间的重连，唤醒后恢复挂起前的状态。
+		// 只在"需要重连"时才清除的话，休眠时散热器本来就没接的情况会永久失去自动重连：
+		// 唤醒后再插上，HID 到达与健康检查的重连都会被当作"已手动断开"忽略。
+		a.autoReconnectSuppressed.Store(a.suppressedBeforeSuspend.Load() && !resumeReconnectWanted)
 		a.ensureTemperatureMonitoring("system-resume")
 	}
 
@@ -581,6 +610,7 @@ func (a *CoreApp) handleSystemResume(source string, gap time.Duration, forceReco
 	a.isConnected = false
 	a.deviceSettings = nil
 	a.mutex.Unlock()
+	a.resetDeviceModeTracking()
 
 	if a.ipcServer != nil {
 		a.ipcServer.BroadcastEvent(ipc.EventDeviceDisconnected, nil)
@@ -967,9 +997,13 @@ func (a *CoreApp) automaticReplayTargetRPM(cfg types.AppConfig) (targetRPM int, 
 
 // GetDeviceStatus 获取设备状态
 func (a *CoreApp) GetDeviceStatus() map[string]any {
+	// 先拷出核心字段再调用设备 getter，不在持有 a.mutex 时去等设备锁：
+	// 发送方持设备锁等待 ACK 时，这会把需要 a.mutex 的路径一起拖住。
 	a.mutex.RLock()
 	settings := a.deviceSettings
-	defer a.mutex.RUnlock()
+	connected := a.isConnected
+	currentTemp := a.currentTemp
+	a.mutex.RUnlock()
 
 	productID := a.deviceManager.GetProductID()
 	productIDHex := ""
@@ -980,10 +1014,10 @@ func (a *CoreApp) GetDeviceStatus() map[string]any {
 	model := a.deviceManager.GetModelName()
 
 	return map[string]any{
-		"connected":      a.isConnected,
+		"connected":      connected,
 		"monitoring":     a.monitoringTemp.Load(),
 		"currentData":    a.deviceManager.GetCurrentFanData(),
-		"temperature":    a.currentTemp,
+		"temperature":    currentTemp,
 		"productId":      productIDHex,
 		"model":          model,
 		"deviceSettings": settings,
@@ -1113,6 +1147,14 @@ func (a *CoreApp) setAutomaticFanSpeed(rpm int) (ready, written bool) {
 		return false, false
 	}
 	defer a.deviceControlMutex.Unlock()
+	// 调用方依据的是本周期开头的配置快照。期间用户若已切到手动挡位/自定义转速，
+	// 这次写入会把设备拉回实时模式，而下个周期因智能控温已关闭不会再管它，
+	// 风扇就停在一个过期的实时转速上。模式切换都在本锁之外先改配置，这里复查即可。
+	autoControl := false
+	a.configManager.View(func(cfg *types.AppConfig) { autoControl = cfg.AutoControl })
+	if !autoControl {
+		return false, false
+	}
 	return true, a.deviceManager.SetFanSpeed(rpm)
 }
 
