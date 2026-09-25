@@ -1022,7 +1022,7 @@ namespace THRM.TempBridge
                             var sensors = new System.Collections.Generic.List<TemperatureSensor>();
                             var powerSensors = new System.Collections.Generic.List<PowerSensor>();
                             CollectTemperatureSensors(hardware, "gpu", hardware.Name ?? string.Empty, string.Empty, sensors);
-                            CollectPowerSensors(hardware, "gpu", hardware.Name ?? string.Empty, string.Empty, powerSensors);
+                            CollectPowerSensors(hardware, "gpu", hardware.Name ?? string.Empty, string.Empty, powerSensors, MaxPlausibleGpuPowerWatts(hardware.Name));
                             gpuCandidates.Add(new GpuCandidate
                             {
                                 Key = BuildGpuDeviceKey(hardware, gpuIndex),
@@ -1249,7 +1249,29 @@ namespace THRM.TempBridge
                 }
         }
 
-        static void CollectPowerSensors(IHardware hardware, string devicePrefix, string keyPath, string displayPath, System.Collections.Generic.List<PowerSensor> sensors)
+        // 读数上限只用来剔除物理上不可能的值，不是功耗墙。
+        const double MaxPlausiblePowerWatts = 2000;
+        // 笔记本独显的整卡功耗（含 Dynamic Boost）目前不超过 200 W，留出余量。
+        // 桌面卡（5090 可到 600 W）不能套用这个上限。
+        const double MaxPlausibleLaptopGpuPowerWatts = 250;
+
+        // MaxPlausibleGpuPowerWatts 返回该 GPU 读数的可信上限。
+        //
+        // 混合输出的笔记本上，独显刚从 D3cold 唤醒时 NVML 的 nvmlDeviceGetPowerUsage
+        // 会返回垃圾值，例如 RTX 4080 Laptop 报出 593 W（issue #41）。NVIDIA 移动版
+        // 的型号名一律带 "Laptop"，凭它就能认出这类读数；剔除后界面显示 "--"，
+        // 而不是一个离谱的数字，也不会污染历史曲线与散热收益统计。
+        static double MaxPlausibleGpuPowerWatts(string gpuName)
+        {
+            if (!string.IsNullOrEmpty(gpuName) &&
+                gpuName.IndexOf("Laptop", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return MaxPlausibleLaptopGpuPowerWatts;
+            }
+            return MaxPlausiblePowerWatts;
+        }
+
+        static void CollectPowerSensors(IHardware hardware, string devicePrefix, string keyPath, string displayPath, System.Collections.Generic.List<PowerSensor> sensors, double maxWatts = MaxPlausiblePowerWatts)
         {
             foreach (ISensor sensor in hardware.Sensors)
             {
@@ -1259,7 +1281,7 @@ namespace THRM.TempBridge
                 }
 
                 double watts = Math.Round(sensor.Value.Value, 1);
-                if (watts <= 0 || watts > 2000)
+                if (watts <= 0 || watts > maxWatts)
                 {
                     continue;
                 }
@@ -1281,7 +1303,7 @@ namespace THRM.TempBridge
                 string subDisplayPath = string.IsNullOrEmpty(displayPath)
                     ? (subHardware.Name ?? string.Empty)
                     : displayPath + " / " + (subHardware.Name ?? string.Empty);
-                CollectPowerSensors(subHardware, devicePrefix, subKeyPath, subDisplayPath, sensors);
+                CollectPowerSensors(subHardware, devicePrefix, subKeyPath, subDisplayPath, sensors, maxWatts);
             }
         }
 
