@@ -191,6 +191,23 @@ func TestAnalyzeFindsKneeWhereBenefitFlattens(t *testing.T) {
 	}
 }
 
+// 收益来得晚：最低一段几乎没降温，最佳段在中间。最佳段之前的平缓段不是衰减，
+// 拐点曾因此被报成基准档 1000。
+func TestAnalyzeKneeIgnoresFlatStartBeforeGainsArrive(t *testing.T) {
+	analysis := AnalyzeReport([]types.CoolingBenefitStep{
+		step(1000, 90, 80, 45, 45),
+		step(1600, 89.5, 80, 45, 45),
+		step(2200, 84, 80, 45, 45),
+		step(2800, 80, 78, 45, 45),
+		step(3400, 78, 76, 45, 45),
+		step(4000, 77.5, 76, 45, 45),
+	}, nil)
+
+	if analysis.KneeRPM != 3400 {
+		t.Errorf("收益在 3400 RPM 之后才明显衰减，拐点应为 3400，得到 %d", analysis.KneeRPM)
+	}
+}
+
 func TestAnalyzeSweetSpotAccountsForNoiseCost(t *testing.T) {
 	steps := []types.CoolingBenefitStep{
 		step(1000, 90, 82, 45, 45),

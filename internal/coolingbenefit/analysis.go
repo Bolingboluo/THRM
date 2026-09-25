@@ -197,22 +197,26 @@ func findKnee(ordered []types.CoolingBenefitStep) int {
 	base := ordered[0]
 
 	slopes := make([]float64, len(ordered)-1)
-	best := 0.0
+	best, bestIdx := 0.0, 0
 	for i := 0; i < len(ordered)-1; i++ {
 		span := float64(ordered[i+1].TargetRPM - ordered[i].TargetRPM)
 		if span <= 0 {
 			continue
 		}
 		slopes[i] = (stepBenefit(base, ordered[i+1]) - stepBenefit(base, ordered[i])) / span
-		best = math.Max(best, slopes[i])
+		if slopes[i] > best {
+			best, bestIdx = slopes[i], i
+		}
 	}
 	if best <= 0 {
 		// 全程没有可测量的收益，最低档就是拐点：再快也只是白吵。
 		return ordered[0].TargetRPM
 	}
 
-	for i, slope := range slopes {
-		if slope < best*kneeDecayRatio {
+	// 衰减只能从最佳段往后找：最佳段之前的平缓段是收益还没起来，不是已经衰减，
+	// 从头找会把"低转速几乎没用、中高转速才见效"的机器拐点报成基准档。
+	for i := bestIdx + 1; i < len(slopes); i++ {
+		if slopes[i] < best*kneeDecayRatio {
 			return ordered[i].TargetRPM
 		}
 	}
