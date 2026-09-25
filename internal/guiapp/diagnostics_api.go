@@ -25,7 +25,10 @@ type diagnosticManifest struct {
 	NumCPU    int                `json:"numCpu"`
 	Hardware  diagnosticHardware `json:"hardware"`
 	Debug     map[string]any     `json:"debug"`
-	Config    AppConfig          `json:"config"`
+	// Config 取不到时留空并记下原因，绝不用默认配置冒充：诊断包里的默认值
+	// 会被误读成用户的真实设置。
+	Config      *AppConfig `json:"config,omitempty"`
+	ConfigError string     `json:"configError,omitempty"`
 }
 
 // diagnosticHardware 记录本机 CPU/GPU 的识别结果与读数：排查温控问题先要确认读到的是
@@ -121,7 +124,12 @@ func (a *App) ExportDiagnosticPackage() (string, error) {
 		CreatedAt: time.Now().Format(time.RFC3339), App: appmeta.AppName,
 		OS: gort.GOOS, Arch: gort.GOARCH, NumCPU: gort.NumCPU(),
 		Hardware: a.collectDiagnosticHardware(),
-		Debug:    a.GetDebugInfo(), Config: a.GetConfig(),
+		Debug:    a.GetDebugInfo(),
+	}
+	if cfg, cfgErr := a.GetConfig(); cfgErr != nil {
+		manifest.ConfigError = cfgErr.Error()
+	} else {
+		manifest.Config = &cfg
 	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

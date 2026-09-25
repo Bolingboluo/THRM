@@ -36,33 +36,36 @@ func (a *App) ResetLearnedOffsets() error {
 	return nil
 }
 
-// GetFanCurve 获取风扇曲线
-func (a *App) GetFanCurve() []FanCurvePoint {
+// GetFanCurve 获取风扇曲线。失败时返回错误而不是默认曲线，理由同 GetConfig。
+func (a *App) GetFanCurve() ([]FanCurvePoint, error) {
 	resp, err := a.sendRequest(ipc.ReqGetFanCurve, nil)
 	if err != nil {
-		return types.GetDefaultFanCurve()
+		return nil, err
 	}
 	if !resp.Success {
-		return types.GetDefaultFanCurve()
+		return nil, fmt.Errorf("%s", resp.Error)
 	}
 	var curve []FanCurvePoint
-	json.Unmarshal(resp.Data, &curve)
-	return curve
+	if err := json.Unmarshal(resp.Data, &curve); err != nil {
+		return nil, err
+	}
+	return curve, nil
 }
 
-// GetFanCurveProfiles 获取曲线方案列表
-func (a *App) GetFanCurveProfiles() FanCurveProfilesPayload {
+// GetFanCurveProfiles 获取曲线方案列表。失败时返回错误，理由同 GetConfig。
+func (a *App) GetFanCurveProfiles() (FanCurveProfilesPayload, error) {
 	resp, err := a.sendRequest(ipc.ReqGetFanCurveProfiles, nil)
-	if err != nil || !resp.Success {
-		cfg := a.GetConfig()
-		return types.FanCurveProfilesPayload{
-			Profiles: cfg.FanCurveProfiles,
-			ActiveID: cfg.ActiveFanCurveProfileID,
-		}
+	if err != nil {
+		return FanCurveProfilesPayload{}, err
+	}
+	if !resp.Success {
+		return FanCurveProfilesPayload{}, fmt.Errorf("%s", resp.Error)
 	}
 	var payload FanCurveProfilesPayload
-	json.Unmarshal(resp.Data, &payload)
-	return payload
+	if err := json.Unmarshal(resp.Data, &payload); err != nil {
+		return FanCurveProfilesPayload{}, err
+	}
+	return payload, nil
 }
 
 // SetActiveFanCurveProfile 设置当前激活曲线方案
