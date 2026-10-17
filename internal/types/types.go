@@ -179,6 +179,11 @@ type TemperatureSelection struct {
 	// 只用于展示与散热收益报告；单列开关是因为要为此打开 SMART/SPD/Super I/O 通道，
 	// 对常驻后台的核心不是零成本。
 	ExtendedSensors bool `json:"extendedSensors"`
+	// Compact 请求精简结果：桥接只返回标量读数与 CpuSensors 选中的传感器（多传感器
+	// 平均要用），不再序列化完整传感器清单，并在手动指定 GPU 时只刷新那一块 GPU。
+	// 没有 GUI 在看时清单无人使用，每个采样周期全量构造、序列化、解析纯属浪费。
+	// 旧版桥接不认识该字段，照常返回完整结果，因此新旧组合都能工作。
+	Compact bool `json:"compact,omitempty"`
 }
 
 // NormalizeTemperatureSelection 归一化温度选择配置。
@@ -483,6 +488,9 @@ type BridgeTemperatureData struct {
 	Error             string                 `json:"error"`
 	// CpuTempError 在 GPU 可读、仅 CPU 读不到时也会填充（此时 Success 仍为 true）。
 	CpuTempError string `json:"cpuTempError"`
+	// Compact 表示这是一次精简结果（见 TemperatureSelection.Compact）：CpuSensors 只含
+	// 选中的传感器，GPU/功耗传感器清单与 GpuDevices 为空。旧版桥接不会置位。
+	Compact bool `json:"compact,omitempty"`
 }
 
 // BridgeCommand 桥接程序命令
@@ -803,6 +811,7 @@ type AppConfig struct {
 	WindowsAutoStart                 bool                      `json:"windowsAutoStart"`                 // Windows开机自启动
 	DisableSystemTray                bool                      `json:"disableSystemTray"`                // 关闭系统托盘图标(取反语义：旧配置缺字段时默认显示托盘)
 	ThemeMode                        string                    `json:"themeMode"`                        // 主题模式: system/light/dark/thrm
+	UILanguage                       string                    `json:"uiLanguage"`                       // 界面语言(zh-CN/en-US/ja-JP)，供托盘与系统通知使用；空表示按系统语言推断。仅由 SetUILanguage 维护
 	SmartStartStop                   string                    `json:"smartStartStop"`                   // 智能启停
 	Brightness                       int                       `json:"brightness"`                       // 亮度
 	TempUpdateRate                   int                       `json:"tempUpdateRate"`                   // 温度更新频率(秒)

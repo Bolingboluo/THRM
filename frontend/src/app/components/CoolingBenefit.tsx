@@ -24,6 +24,8 @@ import { toast } from 'sonner';
 import clsx from 'clsx';
 import { types } from '../../../wailsjs/go/models';
 import { apiService } from '../services/api';
+import { useAppStore } from '../store/app-store';
+import { holdCoreTelemetry } from '../hooks/useCoreEventSubscription';
 import { captureFanState, restoreFanState } from '../lib/noise-test';
 import {
   buildBenefitSteps,
@@ -63,7 +65,6 @@ interface CoolingBenefitProps {
   onOpenChange: (open: boolean) => void;
   config: types.AppConfig;
   deviceModel: string | null;
-  temperature: types.TemperatureData | null;
   isConnected: boolean;
 }
 
@@ -91,7 +92,11 @@ function paddedDomain(values: number[], pad: number): [number, number] {
   return [Math.floor(lo - pad), Math.ceil(hi + pad)];
 }
 
-export default function CoolingBenefit({ open, onOpenChange, config, deviceModel, temperature, isConnected }: CoolingBenefitProps) {
+export default function CoolingBenefit({ open, onOpenChange, config, deviceModel, isConnected }: CoolingBenefitProps) {
+  // 只订阅用到的三个值，曲线页本身不必为了这里随每次温度推送重渲染。
+  const liveWatts = useAppStore((state) => (state.temperature?.cpuPower ?? 0) + (state.temperature?.gpuPower ?? 0));
+  const cpuModel = useAppStore((state) => state.temperature?.cpuModel);
+  const gpuModel = useAppStore((state) => state.temperature?.gpuModel);
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>('intro');
   const [payload, setPayload] = useState<types.CoolingBenefitPayload | null>(null);
@@ -106,7 +111,6 @@ export default function CoolingBenefit({ open, onOpenChange, config, deviceModel
 
   const rpmSteps = useMemo(() => buildBenefitSteps(), []);
   const report = payload?.report ?? null;
-  const liveWatts = (temperature?.cpuPower ?? 0) + (temperature?.gpuPower ?? 0);
   const steps = phase === 'running' ? liveSteps : (report?.steps ?? []);
 
   const load = useCallback(async () => {
@@ -183,6 +187,8 @@ export default function CoolingBenefit({ open, onOpenChange, config, deviceModel
     const snapshot = captureFanState(config);
     const controller = new AbortController();
     abortRef.current = controller;
+    // 每档采样读的是核心缓存的温度与转速，窗口被隐藏也不能让核心退回后台低频采样。
+    const releaseTelemetry = holdCoreTelemetry();
     setPhase('running');
     setLiveSteps([]);
     setProgress(null);
@@ -195,8 +201,8 @@ export default function CoolingBenefit({ open, onOpenChange, config, deviceModel
 
       const saved = await apiService.saveCoolingBenefitReport({
         deviceModel: deviceModel || '',
-        cpuModel: temperature?.cpuModel || '',
-        gpuModel: temperature?.gpuModel || '',
+        cpuModel: cpuModel || '',
+        gpuModel: gpuModel || '',
         loadLabel: loadLabel.trim(),
         steps: collected,
       });
@@ -221,9 +227,10 @@ export default function CoolingBenefit({ open, onOpenChange, config, deviceModel
       } finally {
         void apiService.setExtendedSensors(false).catch(() => false);
         setRestoring(false);
+        releaseTelemetry();
       }
     }
-  }, [config, deviceModel, loadLabel, t, temperature?.cpuModel, temperature?.gpuModel]);
+  }, [config, deviceModel, loadLabel, t, cpuModel, gpuModel]);
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
 

@@ -1,9 +1,10 @@
 package coreapp
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
+	"github.com/TIANLI0/THRM/internal/coremsg"
 	hotkeysvc "github.com/TIANLI0/THRM/internal/hotkey"
 	"github.com/TIANLI0/THRM/internal/ipc"
 	"github.com/TIANLI0/THRM/internal/plugins/fnqpowermode"
@@ -305,7 +306,7 @@ func (a *CoreApp) handleHotkeyAction(action hotkeysvc.Action, shortcut string) {
 			msg, err := a.toggleManualGearByHotkey()
 			if err != nil {
 				success = false
-				message = err.Error()
+				message = hotkeyErrorMessage(err)
 			} else {
 				message = msg
 			}
@@ -313,7 +314,7 @@ func (a *CoreApp) handleHotkeyAction(action hotkeysvc.Action, shortcut string) {
 			msg, err := a.toggleAutoControlByHotkey()
 			if err != nil {
 				success = false
-				message = err.Error()
+				message = hotkeyErrorMessage(err)
 			} else {
 				message = msg
 			}
@@ -321,13 +322,13 @@ func (a *CoreApp) handleHotkeyAction(action hotkeysvc.Action, shortcut string) {
 			msg, err := a.toggleCurveProfileByHotkey()
 			if err != nil {
 				success = false
-				message = err.Error()
+				message = hotkeyErrorMessage(err)
 			} else {
 				message = msg
 			}
 		default:
 			success = false
-			message = "未知快捷键动作"
+			message = coremsg.T(coremsg.HotkeyUnknownAction)
 		}
 
 		if a.ipcServer != nil {
@@ -339,9 +340,9 @@ func (a *CoreApp) handleHotkeyAction(action hotkeysvc.Action, shortcut string) {
 			})
 		}
 
-		title := appmeta.AppName + " 快捷键"
+		title := coremsg.Tf(coremsg.HotkeyTitle, appmeta.AppName)
 		if !success {
-			title = appmeta.AppName + " 快捷键失败"
+			title = coremsg.Tf(coremsg.HotkeyFailedTitle, appmeta.AppName)
 		}
 		if a.notifier != nil {
 			a.notifier.Notify(title, message)
@@ -349,12 +350,38 @@ func (a *CoreApp) handleHotkeyAction(action hotkeysvc.Action, shortcut string) {
 	})
 }
 
+// hotkeyMessageError 携带已按当前语言生成的快捷键失败文案，Unwrap 保留原始错误。
+type hotkeyMessageError struct {
+	msg string
+	err error
+}
+
+func (e *hotkeyMessageError) Error() string { return e.msg }
+func (e *hotkeyMessageError) Unwrap() error { return e.err }
+
+// hotkeyErrorMessage 把快捷键动作的错误转成面向用户的文案（同时用于系统通知和 GUI 提示）。
+// 已知错误按当前语言给出译文；其余错误保留原文，在非中文界面下加一句本地化前缀。
+// 中文界面下输出与此前的 err.Error() 逐字一致。
+func hotkeyErrorMessage(err error) string {
+	var localized *hotkeyMessageError
+	switch {
+	case errors.As(err, &localized):
+		return localized.msg
+	case errors.Is(err, errNoCurveProfiles):
+		return coremsg.T(coremsg.HotkeyNoCurveProfiles)
+	case errors.Is(err, errAutoControlBlockedByCustomSpeed):
+		return coremsg.T(coremsg.HotkeyAutoBlockedByCustomRPM)
+	default:
+		return coremsg.Tf(coremsg.HotkeyActionFailed, err.Error())
+	}
+}
+
 func (a *CoreApp) toggleCurveProfileByHotkey() (string, error) {
 	profile, err := a.CycleFanCurveProfile()
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("温控曲线已切换: %s", profile.Name), nil
+	return coremsg.Tf(coremsg.HotkeyCurveSwitched, profile.Name), nil
 }
 
 func (a *CoreApp) toggleAutoControlByHotkey() (string, error) {
@@ -364,9 +391,9 @@ func (a *CoreApp) toggleAutoControlByHotkey() (string, error) {
 		return "", err
 	}
 	if target {
-		return "智能变频已开启", nil
+		return coremsg.T(coremsg.HotkeyAutoOn), nil
 	}
-	return "智能变频已关闭", nil
+	return coremsg.T(coremsg.HotkeyAutoOff), nil
 }
 
 func (a *CoreApp) toggleManualGearByHotkey() (string, error) {
@@ -375,20 +402,22 @@ func (a *CoreApp) toggleManualGearByHotkey() (string, error) {
 	if cfg.AutoControl {
 		// 下面马上会下发新挡位，不能再让 SetAutoControl 异步恢复旧挡位与之竞争。
 		if err := a.setAutoControl(false, false); err != nil {
-			return "", fmt.Errorf("切换到手动模式失败: %w", err)
+			return "", &hotkeyMessageError{msg: coremsg.T(coremsg.HotkeySwitchManualFailed) + ": " + err.Error(), err: err}
 		}
 	}
 
 	nextGear, nextLevel := a.getNextManualGearWithMemory(cfg.ManualGear, cfg.ManualLevel)
 	if ok := a.SetManualGear(nextGear, nextLevel); !ok {
-		return "", fmt.Errorf("应用手动挡位失败")
+		return "", &hotkeyMessageError{msg: coremsg.T(coremsg.HotkeyApplyGearFailed)}
 	}
 
+	// 挡位标识是协议值（中文），只在展示时换成当前语言的名称。
+	gearName, levelName := coremsg.GearName(nextGear), coremsg.LevelName(nextLevel)
 	rpm := cfg.ResolveGearRPM(nextGear, nextLevel)
 	if rpm > 0 {
-		return fmt.Sprintf("手动挡位: %s %s (%d RPM)", nextGear, nextLevel, rpm), nil
+		return coremsg.Tf(coremsg.HotkeyManualGearRPM, gearName, levelName, rpm), nil
 	}
-	return fmt.Sprintf("手动挡位: %s %s", nextGear, nextLevel), nil
+	return coremsg.Tf(coremsg.HotkeyManualGear, gearName, levelName), nil
 }
 
 func (a *CoreApp) getNextManualGearWithMemory(currentGear, currentLevel string) (string, string) {

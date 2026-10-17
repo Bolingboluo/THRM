@@ -2,7 +2,7 @@
 
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence, type Variants } from 'framer-motion';
+import { m as motion, AnimatePresence, LazyMotion, type Variants } from 'framer-motion';
 import {
   Copy,
   LineChart,
@@ -14,7 +14,6 @@ import {
   BluetoothConnected,
   BluetoothOff,
   X,
-  Fan,
   Thermometer,
   Sparkles,
   Info,
@@ -30,6 +29,7 @@ import { BRAND } from '../lib/brand';
 import { useAppStore } from '../store/app-store';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import UpdateProgress from './UpdateProgress';
+import SpinningFanIcon from './SpinningFanIcon';
 
 const MAIN_TAB_ITEMS = [
   { id: 'status', titleKey: 'appShell.tabs.status', icon: LayoutGrid },
@@ -52,6 +52,13 @@ function readStoredSidebarExpanded(): boolean {
     return false;
   }
 }
+
+// framer-motion 只在这里装一次 LazyMotion，各标签页用 m（以 motion 名导入）共享。
+// 特性包在本模块求值时（启动骨架屏阶段）就开始加载，等界面真正出现时早已就绪，
+// 入场/退场动画与同步加载时一致；首屏 JS 里因此不再带 framer 的动画与布局引擎。
+const motionFeaturesPromise =
+  typeof window === 'undefined' ? null : import('../lib/motion-features').then((mod) => mod.default);
+const loadMotionFeatures = () => motionFeaturesPromise ?? import('../lib/motion-features').then((mod) => mod.default);
 
 const TAB_TRANSITION_ORDER: ActiveTab[] = [...MAIN_TAB_ITEMS.map((tab) => tab.id), ABOUT_TAB.id];
 
@@ -229,7 +236,6 @@ function StatusBadges({
   const baseClass = compact
     ? 'inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-medium'
     : 'inline-flex h-8 items-center gap-1.5 rounded-xl border px-3 text-[13px] font-medium';
-  const fanSpinStyle = fanSpinDuration ? { animationDuration: `${fanSpinDuration}s` } : undefined;
 
   return (
     <div
@@ -271,9 +277,7 @@ function StatusBadges({
             </span>
           </span>
           <span className={clsx(baseClass, 'glacier-status-chip border-border bg-card font-semibold text-primary shadow-sm shadow-black/5')}>
-            <span className={clsx('inline-flex', fanSpinDuration && 'animate-spin')} style={fanSpinStyle}>
-              <Fan className="h-3.5 w-3.5" />
-            </span>
+            <SpinningFanIcon duration={fanSpinDuration} className="h-3.5 w-3.5" />
             {currentRpm ?? '--'} RPM
           </span>
         </>
@@ -638,6 +642,7 @@ export default function AppShell({
   }, [activeTab]);
 
   return (
+    <LazyMotion features={loadMotionFeatures}>
     <div
       className={clsx(
         'glacier-shell relative flex h-dvh w-full overflow-hidden bg-background text-foreground',
@@ -841,5 +846,6 @@ export default function AppShell({
         <UpdateProgress />
       </section>
     </div>
+    </LazyMotion>
   );
 }

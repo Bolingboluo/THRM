@@ -46,6 +46,7 @@ func (a *App) Startup(ctx context.Context) {
 	} else {
 		guiLogger.Info("已连接到核心服务")
 		a.ipcClient.SetEventHandler(a.handleCoreEvent)
+		go a.syncCoreEventSubscription()
 		if resp, gen, pingErr := a.ipcClient.SendRequestTracked(ipc.ReqPing, nil, 0); pingErr != nil || resp == nil || !resp.Success {
 			if pingErr != nil {
 				guiLogger.Errorf("核心服务 Ping 失败: %v", pingErr)

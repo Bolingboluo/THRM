@@ -41,6 +41,9 @@ namespace THRM.TempBridge
         // （GPU 基准的控温依然成立），但界面必须能告诉用户 CPU 为什么是空的、
         // 以及怎么修——否则只会看到一个没有任何解释的"无数据"。
         public string CpuTempError { get; set; }
+        // 精简结果（见 TemperatureSelection.Compact）：CpuSensors 只含选中的传感器，
+        // GPU/功耗传感器清单与 GpuDevices 为 null。
+        public bool Compact { get; set; }
 
         public TemperatureData()
         {
@@ -115,6 +118,12 @@ namespace THRM.TempBridge
         // 独立开关是因为它们要额外打开 SMART / SPD / Super I/O 通道，
         // 对常驻后台的核心来说不是零成本，且个别机型上会与其他监控软件抢占 EC。
         public bool ExtendedSensors { get; set; }
+        // 多选的 CPU 传感器（由上层取平均）。精简结果里只回传这些传感器。
+        public string[] CpuSensors { get; set; }
+        // 精简结果：只回传标量读数与 CpuSensors 选中的传感器，不序列化完整清单；
+        // 手动指定 GPU 时只刷新那一块 GPU。上层没有界面在看时使用。
+        // 旧版上层不发送该字段，默认 false，行为与以前完全一致。
+        public bool Compact { get; set; }
 
         public TemperatureSelection()
         {
@@ -124,6 +133,8 @@ namespace THRM.TempBridge
             GpuSensor = "auto";
             DisableGpu = false;
             ExtendedSensors = false;
+            CpuSensors = Array.Empty<string>();
+            Compact = false;
         }
     }
 
@@ -993,7 +1004,12 @@ namespace THRM.TempBridge
             {
                 if (computer != null)
                 {
-                    computer.Accept(updateVisitor);
+                    // 精简模式且手动指定了 GPU：只刷新那一块 GPU（CPU 与其它硬件照常刷新）。
+                    // 混合显卡笔记本上，刷新未选中的独显会不断把它从 D3cold 唤醒。
+                    // 自动选择要比较各 GPU 当前是否带有效温度传感器，GUI 的设备列表也要
+                    // 显示每块 GPU 的读数，这两种情况仍刷新全部 GPU。
+                    IHardware onlyGpu = selection.Compact ? FindSelectedGpuHardware(selection.GpuDevice) : null;
+                    UpdateHardware(onlyGpu);
 
                     foreach (IHardware hardware in computer.Hardware)
                     {
@@ -1073,19 +1089,33 @@ namespace THRM.TempBridge
             result.SelectedGpuDevice = selectedGpu != null ? selectedGpu.Key : selection.GpuDevice;
             result.CpuModel = cpuModel;
             result.GpuModel = gpuModel;
-            result.CpuSensors = cpuSensors.ToArray();
-            result.GpuSensors = gpuSensors.ToArray();
-            result.CpuPowerSensors = cpuPowerSensors.ToArray();
-            result.GpuPowerSensors = gpuPowerSensors.ToArray();
             result.OtherSensors = otherSensors.ToArray();
-            result.GpuDevices = gpuCandidates.Select(candidate => new TemperatureGpuDevice
+            if (selection.Compact)
             {
-                Key = candidate.Key,
-                Name = candidate.Model,
-                Vendor = candidate.Vendor,
-                Sensors = candidate.Sensors != null ? candidate.Sensors.ToArray() : Array.Empty<TemperatureSensor>(),
-                PowerSensors = candidate.PowerSensors != null ? candidate.PowerSensors.ToArray() : Array.Empty<PowerSensor>()
-            }).ToArray();
+                // 标量读数与完整模式走同一条路径算出，完全一致；清单只回传多传感器平均
+                // 要用的 CPU 传感器，其余由上层用最近一次完整结果回填。
+                result.Compact = true;
+                result.CpuSensors = FilterSelectedSensors(cpuSensors, selection.CpuSensors);
+                result.GpuSensors = null;
+                result.CpuPowerSensors = null;
+                result.GpuPowerSensors = null;
+                result.GpuDevices = null;
+            }
+            else
+            {
+                result.CpuSensors = cpuSensors.ToArray();
+                result.GpuSensors = gpuSensors.ToArray();
+                result.CpuPowerSensors = cpuPowerSensors.ToArray();
+                result.GpuPowerSensors = gpuPowerSensors.ToArray();
+                result.GpuDevices = gpuCandidates.Select(candidate => new TemperatureGpuDevice
+                {
+                    Key = candidate.Key,
+                    Name = candidate.Model,
+                    Vendor = candidate.Vendor,
+                    Sensors = candidate.Sensors != null ? candidate.Sensors.ToArray() : Array.Empty<TemperatureSensor>(),
+                    PowerSensors = candidate.PowerSensors != null ? candidate.PowerSensors.ToArray() : Array.Empty<PowerSensor>()
+                }).ToArray();
+            }
 
             // CPU 读不到就单独上报，哪怕 GPU 正常、整体 Success 仍为 true。
             // 没有这一条，"GPU 可读 + CPU 为空"会被当成完全正常的一次采样，
@@ -1104,6 +1134,93 @@ namespace THRM.TempBridge
             }
 
             return result;
+        }
+
+        static bool IsGpuHardware(HardwareType hardwareType)
+        {
+            return hardwareType == HardwareType.GpuNvidia ||
+                   hardwareType == HardwareType.GpuAmd ||
+                   hardwareType == HardwareType.GpuIntel;
+        }
+
+        // FindSelectedGpuHardware 在刷新传感器之前按设备 key 找出手动指定的 GPU。
+        // key 只由硬件类型、GPU 枚举序号与名称构成（与 GetTemperatureDataUnsafe 的编号
+        // 方式相同），不依赖传感器读数。"auto" 或找不到时返回 null，表示刷新全部 GPU。
+        static IHardware FindSelectedGpuHardware(string selectedDeviceKey)
+        {
+            if (computer == null || string.IsNullOrWhiteSpace(selectedDeviceKey) ||
+                string.Equals(selectedDeviceKey, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            int gpuIndex = 0;
+            foreach (IHardware hardware in computer.Hardware)
+            {
+                if (!IsGpuHardware(hardware.HardwareType))
+                {
+                    continue;
+                }
+                if (string.Equals(BuildGpuDeviceKey(hardware, gpuIndex), selectedDeviceKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return hardware;
+                }
+                gpuIndex++;
+            }
+            return null;
+        }
+
+        // UpdateHardware 刷新传感器读数。onlyGpu 为 null 时与 computer.Accept(updateVisitor)
+        // 完全相同；否则跳过其余 GPU（它们的读数在本次结果里不会被用到）。
+        static void UpdateHardware(IHardware onlyGpu)
+        {
+            if (onlyGpu == null)
+            {
+                computer.Accept(updateVisitor);
+                return;
+            }
+
+            foreach (IHardware hardware in computer.Hardware)
+            {
+                if (IsGpuHardware(hardware.HardwareType) && !ReferenceEquals(hardware, onlyGpu))
+                {
+                    continue;
+                }
+                hardware.Accept(updateVisitor);
+            }
+        }
+
+        // FilterSelectedSensors 保留 key 命中所选列表的传感器（保持原顺序）。上层按 key
+        // 不区分大小写匹配求平均，这里宁可多留也不能漏掉，否则平均值会与完整结果不同。
+        static TemperatureSensor[] FilterSelectedSensors(System.Collections.Generic.List<TemperatureSensor> sensors, string[] selectedKeys)
+        {
+            if (sensors == null || sensors.Count == 0 || selectedKeys == null || selectedKeys.Length == 0)
+            {
+                return Array.Empty<TemperatureSensor>();
+            }
+
+            var selected = new System.Collections.Generic.List<TemperatureSensor>();
+            foreach (var sensor in sensors)
+            {
+                if (sensor == null)
+                {
+                    continue;
+                }
+                foreach (string key in selectedKeys)
+                {
+                    if (key == null)
+                    {
+                        continue;
+                    }
+                    if (string.Equals(sensor.Key, key, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals((sensor.Key ?? string.Empty).ToLowerInvariant(), key.ToLowerInvariant(), StringComparison.Ordinal))
+                    {
+                        selected.Add(sensor);
+                        break;
+                    }
+                }
+            }
+            return selected.ToArray();
         }
 
         static string BuildCpuTemperatureError(string hardwareError)

@@ -487,6 +487,14 @@ textarea,
   animation: pulse-ring 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* 按转速旋转的风扇图标（SpinningFanIcon）：系统要求减少动态效果时不转。
+   失焦暂停由组件内联 animation-play-state 控制。 */
+@media (prefers-reduced-motion: reduce) {
+  .fan-spin {
+    animation: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

@@ -116,6 +116,8 @@ export function SetAutoStartWithMethod(arg1:boolean,arg2:string):Promise<void>;
 
 export function SetBrightness(arg1:number):Promise<boolean>;
 
+export function SetCoreEventSubscription(arg1:boolean):Promise<void>;
+
 export function SetCustomSpeed(arg1:boolean,arg2:number):Promise<void>;
 
 export function SetDebugMode(arg1:boolean):Promise<void>;
@@ -139,6 +141,8 @@ export function SetSmartStartStop(arg1:string):Promise<boolean>;
 export function SetTemperatureHistoryEnabled(arg1:boolean):Promise<void>;
 
 export function SetTemperatureHistoryRetentionHours(arg1:number):Promise<void>;
+
+export function SetUILanguage(arg1:string):Promise<string>;
 
 export function SetWindowsAutoStart(arg1:boolean):Promise<void>;
 

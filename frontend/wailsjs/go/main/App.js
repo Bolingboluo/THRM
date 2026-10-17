@@ -218,6 +218,10 @@ export function SetBrightness(arg1) {
   return window['go']['main']['App']['SetBrightness'](arg1);
 }
 
+export function SetCoreEventSubscription(arg1) {
+  return window['go']['main']['App']['SetCoreEventSubscription'](arg1);
+}
+
 export function SetCustomSpeed(arg1, arg2) {
   return window['go']['main']['App']['SetCustomSpeed'](arg1, arg2);
 }
@@ -264,6 +268,10 @@ export function SetTemperatureHistoryEnabled(arg1) {
 
 export function SetTemperatureHistoryRetentionHours(arg1) {
   return window['go']['main']['App']['SetTemperatureHistoryRetentionHours'](arg1);
+}
+
+export function SetUILanguage(arg1) {
+  return window['go']['main']['App']['SetUILanguage'](arg1);
 }
 
 export function SetWindowsAutoStart(arg1) {

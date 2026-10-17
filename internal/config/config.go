@@ -131,6 +131,7 @@ func (m *Manager) tryLoadFromPathLocked(configPath string) bool {
 	applyMissingTemperatureDefaults(&config, rawConfig)
 	applyMissingFanFeatureDefaults(&config, rawConfig)
 	applyMissingRTSSDefaults(&config, rawConfig)
+	applyMissingUILanguageDefaults(&config, rawConfig)
 
 	m.config = config
 	return true
@@ -296,7 +297,7 @@ func (m *Manager) saveLocked() error {
 		defaultSaveErr = err
 		m.logError("保存配置到默认目录失败: %v", err)
 	} else {
-		m.config.ConfigPath = defaultConfigPath
+		m.setConfigPathLocked(defaultConfigPath)
 		m.logInfo("配置保存到默认目录成功: %s", defaultConfigPath)
 		return nil
 	}
@@ -319,9 +320,19 @@ func (m *Manager) saveLocked() error {
 		return err
 	}
 
-	m.config.ConfigPath = installConfigPath
+	m.setConfigPathLocked(installConfigPath)
 	m.logInfo("配置保存到安装目录成功: %s", installConfigPath)
 	return nil
+}
+
+// setConfigPathLocked 记录实际保存位置。路径真的变了才算配置变化，需要推进修订号，
+// 否则按修订号缓存快照的调用方会一直拿着旧路径。
+func (m *Manager) setConfigPathLocked(path string) {
+	if m.config.ConfigPath == path {
+		return
+	}
+	m.config.ConfigPath = path
+	m.bumpRevisionLocked()
 }
 
 // writeFileAtomic 先写同目录临时文件并刷盘，再替换目标文件。
@@ -418,6 +429,14 @@ func (m *Manager) Get() types.AppConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.Clone()
+}
+
+// Revision 返回当前配置修订号。任何改动配置内容的操作都会推进修订号，
+// 热路径可先比较修订号，只在变化时才调用 GetWithRevision 深拷贝整份配置。
+func (m *Manager) Revision() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.revision
 }
 
 func (m *Manager) GetWithRevision() (types.AppConfig, uint64) {

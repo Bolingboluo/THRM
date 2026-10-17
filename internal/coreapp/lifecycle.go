@@ -2,7 +2,6 @@ package coreapp
 
 import (
 	"os"
-	"strings"
 	"time"
 
 	"github.com/TIANLI0/THRM/internal/autostart"
@@ -88,6 +87,8 @@ func (a *CoreApp) Start() error {
 		}
 	}
 	a.syncManualGearLevelMemory(cfg)
+	// 托盘与通知的语言要在 IPC 和托盘启动前定好：开机自启时 GUI 往往还没打开。
+	a.initUILanguage(cfg.UILanguage)
 	if a.rtssPublisher != nil {
 		a.rtssPublisher.Configure(cfg.RTSS.Enabled, time.Duration(cfg.RTSS.UpdateIntervalMS)*time.Millisecond)
 		a.rtssPublisher.SetPosition(cfg.RTSS.PositionMode, cfg.RTSS.PositionX, cfg.RTSS.PositionY)
@@ -173,6 +174,7 @@ func (a *CoreApp) Start() error {
 		a.logDebug("注册 HID 接口到达通知失败，将使用周期性重试兜底: %v", err)
 	} else {
 		a.hidArrivalNotifyStop = stop
+		a.hidArrivalNotifyActive.Store(true)
 		a.logInfo("已注册飞智 HID 设备接口到达通知")
 	}
 
@@ -246,6 +248,8 @@ func (a *CoreApp) Stop() {
 	}
 	// 历史记录攒够一批才落盘，退出前补写一次，否则每次关机/重启都会丢掉最后一段采样。
 	a.flushTemperatureHistory("shutdown")
+	// 控温循环退出时已保存学习偏移；等待超时的情况下在这里兜底。
+	a.saveLearnedOffsetsIfDirty("shutdown")
 	if a.hotkeyManager != nil {
 		a.hotkeyManager.Stop()
 	}
@@ -305,24 +309,20 @@ func (a *CoreApp) initSystemTray() {
 			return profile.Name
 		},
 		func() ([]tray.CurveOption, string) {
-			cfg := a.configManager.Get()
+			cfg := a.trayConfigView()
 			options := make([]tray.CurveOption, 0, len(cfg.FanCurveProfiles))
 			for _, p := range cfg.FanCurveProfiles {
 				if p.ID == "" {
 					continue
 				}
-				name := p.Name
-				if strings.TrimSpace(name) == "" {
-					name = "默认"
-				}
-				options = append(options, tray.CurveOption{ID: p.ID, Name: name})
+				options = append(options, tray.CurveOption{ID: p.ID, Name: curveDisplayName(p.Name)})
 			}
 			return options, cfg.ActiveFanCurveProfileID
 		},
 		func() tray.Status {
 			a.mutex.RLock()
 			defer a.mutex.RUnlock()
-			cfg := a.configManager.Get()
+			cfg := a.trayConfigView()
 			fanData := a.deviceManager.GetCurrentFanData()
 			var currentRPM uint16
 			if fanData != nil {
@@ -333,11 +333,7 @@ func (a *CoreApp) initSystemTray() {
 				if p.ID == "" {
 					continue
 				}
-				name := p.Name
-				if strings.TrimSpace(name) == "" {
-					name = "默认"
-				}
-				curveOptions = append(curveOptions, tray.CurveOption{ID: p.ID, Name: name})
+				curveOptions = append(curveOptions, tray.CurveOption{ID: p.ID, Name: curveDisplayName(p.Name)})
 			}
 
 			return tray.Status{

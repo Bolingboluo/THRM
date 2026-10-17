@@ -33,7 +33,7 @@
       "ja-JP": "日本語"
     },
     "actions": {
-      "apply": "インポート",
+      "apply": "適用",
       "back": "戻る",
       "cancel": "キャンセル",
       "close": "閉じる",
@@ -42,7 +42,7 @@
       "delete": "削除",
       "done": "完了",
       "export": "エクスポート",
-      "import": "適用",
+      "import": "インポート",
       "refresh": "更新",
       "retry": "再試行",
       "save": "保存"
@@ -218,6 +218,7 @@
       "stateLine": "ブリッジ状態: {{state}}",
       "ownsProcess": "現在のインスタンスがプロセスを所有しています",
       "sharedProcess": "現在のインスタンスは共有プロセスを再利用しています",
+      "transportLine": "通信方式: {{transport}}",
       "pipeLine": "名前付きパイプ: {{pipe}}",
       "diagnosticsLine": "診断情報: {{message}}",
       "reinitialize": "温度モニタリングを初期化",
@@ -257,7 +258,7 @@
   "manualGear": {
     "gears": {
       "quiet": "サイレント",
-      "standard": "スタンダート",
+      "standard": "スタンダード",
       "strong": "ストロング",
       "overclock": "オーバークロック"
     },

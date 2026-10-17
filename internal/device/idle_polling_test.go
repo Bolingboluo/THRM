@@ -3,6 +3,8 @@ package device
 import (
 	"testing"
 	"time"
+
+	"github.com/TIANLI0/THRM/internal/types"
 )
 
 // TestIdlePollingInterval 覆盖 #10：空闲时放慢 HID 空转轮询。
@@ -12,6 +14,8 @@ import (
 // 托盘 5 秒才刷新一次，因此可以降到 2 次/秒。
 func TestIdlePollingInterval(t *testing.T) {
 	m := NewManager(testLogger{})
+	// 空闲轮询只在本次连接已读到过状态帧后生效，见 TestIdlePollingWaitsForFirstStatusFrame。
+	m.currentFanData.Store(&types.FanData{})
 
 	if got := m.readPollInterval(); got != hidReadPollInterval {
 		t.Fatalf("默认轮询间隔 = %s, want %s", got, hidReadPollInterval)
@@ -61,5 +65,59 @@ func TestWaitPollIntervalElapses(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < hidReadPollInterval {
 		t.Fatalf("等待时间 %v 短于轮询间隔 %s", elapsed, hidReadPollInterval)
+	}
+}
+
+// TestIdlePollingWaitsForFirstStatusFrame 验证新连接在读到首个状态帧之前不放慢轮询：
+// 连接就绪判定在等这一帧，放慢会让它错过宽限期而改走整套设置查询。
+func TestIdlePollingWaitsForFirstStatusFrame(t *testing.T) {
+	m := NewManager(testLogger{})
+	m.SetIdlePolling(true)
+	if got := m.readPollInterval(); got != hidReadPollInterval {
+		t.Fatalf("尚无状态帧时轮询间隔 = %s, want %s", got, hidReadPollInterval)
+	}
+	m.currentFanData.Store(&types.FanData{})
+	if got := m.readPollInterval(); got != hidIdleReadPollInterval {
+		t.Fatalf("已有状态帧后轮询间隔 = %s, want %s", got, hidIdleReadPollInterval)
+	}
+}
+
+// TestSingleCommandAckWaitWakesIdlePoller 验证单条命令等 ACK 时同样标记事务：
+// 处于空闲休眠的读循环被立即唤醒，而不是等空闲间隔自然到期才读到 ACK。
+// 智能控温每次下发转速都走这条路径，空闲轮询因此可以覆盖开着智能控温的后台场景。
+func TestSingleCommandAckWaitWakesIdlePoller(t *testing.T) {
+	m := NewManager(testLogger{})
+	m.SetIdlePolling(true)
+	m.currentFanData.Store(&types.FanData{})
+
+	stop := make(chan struct{})
+	defer close(stop)
+	woke := make(chan time.Duration, 1)
+	sleeping := make(chan struct{})
+	go func() {
+		close(sleeping)
+		start := time.Now()
+		m.waitPollInterval(stop)
+		woke <- time.Since(start)
+	}()
+	<-sleeping
+	time.Sleep(20 * time.Millisecond)
+
+	func() {
+		// 测试里没有真实 HID 句柄，写入会在事务标记之后 panic；这里只关心标记本身。
+		defer func() { _ = recover() }()
+		_, _ = m.sendHIDCommandAndWaitLocked(0x21, nil, hidControlReportLen, 10*time.Millisecond)
+	}()
+
+	select {
+	case elapsed := <-woke:
+		if elapsed >= hidIdleReadPollInterval/2 {
+			t.Fatalf("等 ACK 时读循环 %v 后才醒来，未被立即唤醒", elapsed)
+		}
+	case <-time.After(hidIdleReadPollInterval * 2):
+		t.Fatal("等 ACK 时读循环未被唤醒")
+	}
+	if got := m.activeTransactions.Load(); got != 0 {
+		t.Fatalf("命令结束后事务计数 = %d, want 0", got)
 	}
 }

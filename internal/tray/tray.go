@@ -11,6 +11,7 @@ import (
 
 	"fyne.io/systray"
 	"github.com/TIANLI0/THRM/internal/appmeta"
+	"github.com/TIANLI0/THRM/internal/coremsg"
 	"github.com/TIANLI0/THRM/internal/types"
 )
 
@@ -182,7 +183,7 @@ func formatTooltipReadings(status Status) []string {
 
 	lines := []string{readings}
 	if status.CurrentRPM > 0 {
-		lines = append(lines, fmt.Sprintf("风扇 %d RPM", status.CurrentRPM))
+		lines = append(lines, coremsg.Tf(coremsg.TrayTooltipFan, status.CurrentRPM))
 	}
 	return lines
 }
@@ -190,12 +191,17 @@ func formatTooltipReadings(status Status) []string {
 // statusTooltip 按设备状态生成悬浮提示。
 func statusTooltip(status Status) string {
 	if !status.Connected {
-		return appmeta.AppName + " - 设备未连接"
+		return coremsg.Tf(coremsg.TrayTooltipDisconnected, appmeta.AppName)
 	}
 	if status.AutoControlState {
-		return buildTrayTooltip(appmeta.AppName+" - 智能变频中", formatTooltipReadings(status))
+		return buildTrayTooltip(coremsg.Tf(coremsg.TrayTooltipSmartControl, appmeta.AppName), formatTooltipReadings(status))
 	}
-	return buildTrayTooltip(appmeta.AppName+" - 手动模式", formatTooltipReadings(status))
+	return buildTrayTooltip(coremsg.Tf(coremsg.TrayTooltipManualMode, appmeta.AppName), formatTooltipReadings(status))
+}
+
+// runningTooltip 是尚未渲染真实状态时的通用悬浮提示。
+func runningTooltip() string {
+	return coremsg.Tf(coremsg.TrayTooltipRunning, appmeta.AppName)
 }
 
 // setTooltip 设置悬浮提示并记住它，供图标刷新时原样恢复。只能在 UI 队列中调用。
@@ -209,7 +215,7 @@ func (m *Manager) currentTooltip() string {
 	if text, ok := m.lastTooltip.Load().(string); ok && text != "" {
 		return text
 	}
-	return appmeta.AppName + " - 运行中"
+	return runningTooltip()
 }
 
 func statusEqual(left, right Status) bool {
@@ -656,7 +662,7 @@ func (m *Manager) setupIcon() (err error) {
 
 	systray.SetIcon(m.iconData)
 	systray.SetTitle(appmeta.AppName)
-	systray.SetTooltip(appmeta.AppName + " - 运行中")
+	systray.SetTooltip(runningTooltip())
 	return nil
 }
 
@@ -670,29 +676,29 @@ func (m *Manager) createMenu() (items *MenuItems, err error) {
 
 	items = &MenuItems{}
 
-	items.Show = systray.AddMenuItem("显示主窗口", "显示控制器主窗口")
+	items.Show = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuShow), coremsg.T(coremsg.TrayMenuShowTip))
 	systray.AddSeparator()
 
-	items.DeviceStatus = systray.AddMenuItem("设备状态", "查看设备连接状态")
+	items.DeviceStatus = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuDeviceStatus), coremsg.T(coremsg.TrayMenuDeviceStatusTip))
 	items.DeviceStatus.Disable()
 
-	items.CPUTemperature = systray.AddMenuItem("CPU温度", "显示当前CPU温度")
+	items.CPUTemperature = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuCPUTemp), coremsg.T(coremsg.TrayMenuCPUTempTip))
 	items.CPUTemperature.Disable()
 
-	items.GPUTemperature = systray.AddMenuItem("GPU温度", "显示当前GPU温度")
+	items.GPUTemperature = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuGPUTemp), coremsg.T(coremsg.TrayMenuGPUTempTip))
 	items.GPUTemperature.Disable()
 
-	items.CPUPower = systray.AddMenuItem("CPU功耗", "显示当前CPU封装功耗")
+	items.CPUPower = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuCPUPower), coremsg.T(coremsg.TrayMenuCPUPowerTip))
 	items.CPUPower.Disable()
 	items.CPUPower.Hide()
 
-	items.GPUPower = systray.AddMenuItem("GPU功耗", "显示当前GPU功耗")
+	items.GPUPower = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuGPUPower), coremsg.T(coremsg.TrayMenuGPUPowerTip))
 	items.GPUPower.Disable()
 	items.GPUPower.Hide()
 
-	items.FanSpeed = systray.AddMenuItem("风扇转速", "显示当前风扇转速")
+	items.FanSpeed = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuFanSpeed), coremsg.T(coremsg.TrayMenuFanSpeedTip))
 	items.FanSpeed.Disable()
-	items.CurveSelect = systray.AddMenuItem("选择温控曲线", "直接切换到指定温控曲线")
+	items.CurveSelect = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuCurveSelect), coremsg.T(coremsg.TrayMenuCurveSelectTip))
 
 	if m.getCurveOptions != nil {
 		profiles, activeID := m.getCurveOptions()
@@ -705,12 +711,77 @@ func (m *Manager) createMenu() (items *MenuItems, err error) {
 	if m.getStatus != nil {
 		autoControlEnabled = m.getStatus().AutoControlState
 	}
-	items.AutoControl = systray.AddMenuItemCheckbox("智能变频", "启用/禁用智能变频", autoControlEnabled)
+	items.AutoControl = systray.AddMenuItemCheckbox(coremsg.T(coremsg.TrayMenuAutoControl), coremsg.T(coremsg.TrayMenuAutoControlTip), autoControlEnabled)
 
 	systray.AddSeparator()
-	items.Quit = systray.AddMenuItem("退出", "完全退出应用")
+	items.Quit = systray.AddMenuItem(coremsg.T(coremsg.TrayMenuQuit), coremsg.T(coremsg.TrayMenuQuitTip))
 
 	return items, nil
+}
+
+// RefreshLanguage 在界面语言切换后立即按新语言重写托盘文字（菜单项、提示、悬浮提示）。
+//
+// 只改已有菜单项的标题与提示，不重建菜单：systray 的菜单项创建后无法删除，
+// 重建会在每次切换语言时多出一整套隐藏项。托盘尚未就绪时无需处理，下次建菜单
+// 自然会用新语言；但要丢掉旧语言的悬浮提示缓存，免得图标刷新把它恢复回来。
+// 调用方不得持有核心的配置锁：这里会同步取一次状态。
+func (m *Manager) RefreshLanguage() {
+	if atomic.LoadInt32(&m.readyState) == 0 || atomic.LoadInt32(&m.initialized) == 0 || m.isDisabled() {
+		m.lastTooltip.Store("")
+		return
+	}
+
+	var status Status
+	hasStatus := m.getStatus != nil
+	if hasStatus {
+		status = m.getStatus()
+	}
+
+	m.enqueueUI("refresh-language", func() {
+		if m.menuItems == nil {
+			return
+		}
+		m.applyMenuTexts(m.menuItems)
+		if hasStatus {
+			m.renderStatus(status)
+		} else {
+			m.setTooltip(runningTooltip())
+		}
+	})
+}
+
+// applyMenuTexts 按当前语言重写不随状态变化的菜单文字。随状态变化的标题由 renderStatus 覆盖。
+// 只能在 UI 队列中调用。
+func (m *Manager) applyMenuTexts(items *MenuItems) {
+	setText := func(item *systray.MenuItem, title, tooltip coremsg.Key) {
+		if item == nil {
+			return
+		}
+		item.SetTitle(coremsg.T(title))
+		item.SetTooltip(coremsg.T(tooltip))
+	}
+	setText(items.Show, coremsg.TrayMenuShow, coremsg.TrayMenuShowTip)
+	setText(items.DeviceStatus, coremsg.TrayMenuDeviceStatus, coremsg.TrayMenuDeviceStatusTip)
+	setText(items.CPUTemperature, coremsg.TrayMenuCPUTemp, coremsg.TrayMenuCPUTempTip)
+	setText(items.GPUTemperature, coremsg.TrayMenuGPUTemp, coremsg.TrayMenuGPUTempTip)
+	setText(items.CPUPower, coremsg.TrayMenuCPUPower, coremsg.TrayMenuCPUPowerTip)
+	setText(items.GPUPower, coremsg.TrayMenuGPUPower, coremsg.TrayMenuGPUPowerTip)
+	setText(items.FanSpeed, coremsg.TrayMenuFanSpeed, coremsg.TrayMenuFanSpeedTip)
+	setText(items.CurveSelect, coremsg.TrayMenuCurveSelect, coremsg.TrayMenuCurveSelectTip)
+	setText(items.AutoControl, coremsg.TrayMenuAutoControl, coremsg.TrayMenuAutoControlTip)
+	setText(items.Quit, coremsg.TrayMenuQuit, coremsg.TrayMenuQuitTip)
+
+	for id, item := range m.curveMenuItems {
+		if item == nil {
+			continue
+		}
+		if id == "__empty__" {
+			item.SetTitle(coremsg.T(coremsg.TrayMenuCurveEmpty))
+			continue
+		}
+		// 曲线项标题是用户起的方案名，不翻译，只更新提示。
+		item.SetTooltip(coremsg.T(coremsg.TrayMenuCurveItemTip))
+	}
 }
 
 // handleMenuEvents 处理托盘菜单事件
@@ -827,66 +898,7 @@ func (m *Manager) updateMenuStatus(instanceDone <-chan struct{}) {
 				continue
 			}
 			if m.enqueueUI("update-menu-status", func() {
-				if m.menuItems == nil {
-					return
-				}
-
-				if status.Connected {
-					m.menuItems.DeviceStatus.SetTitle("设备状态: 已连接")
-				} else {
-					m.menuItems.DeviceStatus.SetTitle("设备状态: 未连接")
-				}
-
-				if status.CPUTemp > 0 {
-					m.menuItems.CPUTemperature.SetTitle(fmt.Sprintf("CPU温度: %d°C", status.CPUTemp))
-				} else {
-					m.menuItems.CPUTemperature.SetTitle("CPU温度: 无数据")
-				}
-
-				if status.GPUMonitoringDisabled {
-					m.menuItems.GPUTemperature.Hide()
-				} else {
-					m.menuItems.GPUTemperature.Show()
-					if status.GPUTemp > 0 {
-						m.menuItems.GPUTemperature.SetTitle(fmt.Sprintf("GPU温度: %d°C", status.GPUTemp))
-					} else {
-						m.menuItems.GPUTemperature.SetTitle("GPU温度: 无数据")
-					}
-				}
-
-				// 功耗要 PawnIO 加上 CPU/GPU 本身支持才读得到，不少机型没有。
-				// 读不到就整行隐藏，而不是摆一个会误导人的 0 W。
-				if status.CPUPower > 0 {
-					m.menuItems.CPUPower.SetTitle(fmt.Sprintf("CPU功耗: %.1f W", status.CPUPower))
-					m.menuItems.CPUPower.Show()
-				} else {
-					m.menuItems.CPUPower.Hide()
-				}
-				if status.GPUPower > 0 && !status.GPUMonitoringDisabled {
-					m.menuItems.GPUPower.SetTitle(fmt.Sprintf("GPU功耗: %.1f W", status.GPUPower))
-					m.menuItems.GPUPower.Show()
-				} else {
-					m.menuItems.GPUPower.Hide()
-				}
-
-				if status.CurrentRPM > 0 {
-					m.menuItems.FanSpeed.SetTitle(fmt.Sprintf("风扇转速: %d RPM", status.CurrentRPM))
-				} else {
-					m.menuItems.FanSpeed.SetTitle("风扇转速: 无数据")
-				}
-
-				if m.menuItems.CurveSelect != nil {
-					m.ensureCurveMenuItems(m.menuItems.CurveSelect, status.CurveProfiles)
-					m.updateCurveMenuSelection(status.ActiveCurveProfileID)
-				}
-
-				if status.AutoControlState {
-					m.menuItems.AutoControl.Check()
-				} else {
-					m.menuItems.AutoControl.Uncheck()
-				}
-
-				m.setTooltip(statusTooltip(status))
+				m.renderStatus(status)
 			}) {
 				previousStatus = status
 				hasPreviousStatus = true
@@ -897,6 +909,70 @@ func (m *Manager) updateMenuStatus(instanceDone <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// renderStatus 按状态与当前语言重写菜单读数和悬浮提示。只能在 UI 队列中调用。
+func (m *Manager) renderStatus(status Status) {
+	if m.menuItems == nil {
+		return
+	}
+
+	if status.Connected {
+		m.menuItems.DeviceStatus.SetTitle(coremsg.T(coremsg.TrayMenuDeviceConnected))
+	} else {
+		m.menuItems.DeviceStatus.SetTitle(coremsg.T(coremsg.TrayMenuDeviceDisconnected))
+	}
+
+	if status.CPUTemp > 0 {
+		m.menuItems.CPUTemperature.SetTitle(coremsg.Tf(coremsg.TrayMenuCPUTempValue, status.CPUTemp))
+	} else {
+		m.menuItems.CPUTemperature.SetTitle(coremsg.T(coremsg.TrayMenuCPUTempNoData))
+	}
+
+	if status.GPUMonitoringDisabled {
+		m.menuItems.GPUTemperature.Hide()
+	} else {
+		m.menuItems.GPUTemperature.Show()
+		if status.GPUTemp > 0 {
+			m.menuItems.GPUTemperature.SetTitle(coremsg.Tf(coremsg.TrayMenuGPUTempValue, status.GPUTemp))
+		} else {
+			m.menuItems.GPUTemperature.SetTitle(coremsg.T(coremsg.TrayMenuGPUTempNoData))
+		}
+	}
+
+	// 功耗要 PawnIO 加上 CPU/GPU 本身支持才读得到，不少机型没有。
+	// 读不到就整行隐藏，而不是摆一个会误导人的 0 W。
+	if status.CPUPower > 0 {
+		m.menuItems.CPUPower.SetTitle(coremsg.Tf(coremsg.TrayMenuCPUPowerValue, status.CPUPower))
+		m.menuItems.CPUPower.Show()
+	} else {
+		m.menuItems.CPUPower.Hide()
+	}
+	if status.GPUPower > 0 && !status.GPUMonitoringDisabled {
+		m.menuItems.GPUPower.SetTitle(coremsg.Tf(coremsg.TrayMenuGPUPowerValue, status.GPUPower))
+		m.menuItems.GPUPower.Show()
+	} else {
+		m.menuItems.GPUPower.Hide()
+	}
+
+	if status.CurrentRPM > 0 {
+		m.menuItems.FanSpeed.SetTitle(coremsg.Tf(coremsg.TrayMenuFanSpeedValue, status.CurrentRPM))
+	} else {
+		m.menuItems.FanSpeed.SetTitle(coremsg.T(coremsg.TrayMenuFanSpeedNoData))
+	}
+
+	if m.menuItems.CurveSelect != nil {
+		m.ensureCurveMenuItems(m.menuItems.CurveSelect, status.CurveProfiles)
+		m.updateCurveMenuSelection(status.ActiveCurveProfileID)
+	}
+
+	if status.AutoControlState {
+		m.menuItems.AutoControl.Check()
+	} else {
+		m.menuItems.AutoControl.Uncheck()
+	}
+
+	m.setTooltip(statusTooltip(status))
 }
 
 // onTrayExit 托盘退出时的回调
@@ -1161,7 +1237,7 @@ func (m *Manager) ensureCurveMenuItems(parent *systray.MenuItem, options []Curve
 
 	if len(options) == 0 {
 		if len(m.curveMenuItems) == 0 {
-			emptyItem := parent.AddSubMenuItem("暂无可用曲线", "")
+			emptyItem := parent.AddSubMenuItem(coremsg.T(coremsg.TrayMenuCurveEmpty), "")
 			emptyItem.Disable()
 			m.curveMenuItems["__empty__"] = emptyItem
 		}
@@ -1199,7 +1275,7 @@ func (m *Manager) ensureCurveMenuItems(parent *systray.MenuItem, options []Curve
 			continue
 		}
 
-		item := parent.AddSubMenuItemCheckbox(option.Name, "切换温控曲线", false)
+		item := parent.AddSubMenuItemCheckbox(option.Name, coremsg.T(coremsg.TrayMenuCurveItemTip), false)
 		m.curveMenuItems[option.ID] = item
 
 		profileID := option.ID

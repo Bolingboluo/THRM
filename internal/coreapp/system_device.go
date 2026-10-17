@@ -164,6 +164,8 @@ func (a *CoreApp) onDeviceDisconnect() {
 	a.resetDeviceModeTracking()
 
 	if wasConnected {
+		// 刚断开：健康检查的重连兜底回到快速节奏，瞬时掉线仍能像以前一样尽快恢复。
+		a.healthReconnectStreak.Store(0)
 		a.logInfo("设备连接已断开，将在健康检查时尝试自动重连")
 		a.recordTimelineEvent(types.TimelineEventTypeDisconnect, types.TimelineKeyDeviceDisconnected)
 	}
@@ -205,7 +207,18 @@ func cloneReconnectDelays(delays []time.Duration) []time.Duration {
 }
 
 func (a *CoreApp) requestReconnect(reason string, retryDelays []time.Duration) {
+	a.requestReconnectWithLogging(reason, retryDelays, false)
+}
+
+// requestReconnectWithLogging 与 requestReconnect 相同；quiet=true 时把重连流程中
+// 例行的进度/失败日志降到 Debug。用于设备长期不在时健康检查的反复重试，
+// 避免每 30 秒写一组相同的错误日志。
+func (a *CoreApp) requestReconnectWithLogging(reason string, retryDelays []time.Duration, quiet bool) {
 	if a.autoReconnectSuppressed.Load() {
+		if quiet {
+			a.logDebug("自动重连已被手动断开抑制，忽略请求: %s", reason)
+			return
+		}
 		a.logInfo("自动重连已被手动断开抑制，忽略请求: %s", reason)
 		return
 	}
@@ -227,7 +240,7 @@ func (a *CoreApp) requestReconnect(reason string, retryDelays []time.Duration) {
 	delays := cloneReconnectDelays(retryDelays)
 	a.safeGo("reconnect@"+reason, func() {
 		defer a.finishReconnect(cancel, done, wake)
-		a.runReconnectLoop(reason, delays, cancel, wake)
+		a.runReconnectLoop(reason, delays, cancel, wake, quiet)
 	})
 }
 
@@ -310,8 +323,12 @@ func (a *CoreApp) wakeReconnect() bool {
 }
 
 // runReconnectLoop 安排设备重连
-func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, cancel, wake <-chan struct{}) {
-	a.logInfo("启动设备重连流程: %s", reason)
+func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, cancel, wake <-chan struct{}, quiet bool) {
+	logProgress, logFailure := a.logInfo, a.logError
+	if quiet {
+		logProgress, logFailure = a.logDebug, a.logDebug
+	}
+	logProgress("启动设备重连流程: %s", reason)
 
 	for i, delay := range retryDelays {
 		select {
@@ -337,7 +354,7 @@ func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, c
 		}
 
 		if delay > 0 {
-			a.logInfo("等待 %v 后尝试第 %d 次重连...", delay, i+1)
+			logProgress("等待 %v 后尝试第 %d 次重连...", delay, i+1)
 			if !reconnectDelayElapsed(delay, cancel, wake) {
 				a.logInfo("重连流程已取消: %s", reason)
 				return
@@ -366,7 +383,7 @@ func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, c
 			return
 		}
 
-		a.logInfo("尝试第 %d 次重连设备...", i+1)
+		logProgress("尝试第 %d 次重连设备...", i+1)
 		if a.connectDevice(false) {
 			a.logInfo("设备重连成功")
 
@@ -379,10 +396,10 @@ func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, c
 
 			return
 		}
-		a.logError("第 %d 次重连失败", i+1)
+		logFailure("第 %d 次重连失败", i+1)
 	}
 
-	a.logError("所有重连尝试均失败，等待下次健康检查")
+	logFailure("所有重连尝试均失败，等待下次健康检查")
 }
 
 func shouldReconnectAfterResume(proactivelySuspended, resumeReconnectWanted, autoReconnectSuppressed, forceReconnect bool) bool {
@@ -455,6 +472,8 @@ func (a *CoreApp) onSystemSuspend() {
 	// sequence cannot be followed by a stale realtime RPM write.
 	a.waitForDeviceControlIdle()
 	a.stopTemperatureMonitoring()
+	// 学习偏移的周期落盘间隔较长，挂起前补写一次：睡眠中电池耗尽或直接断电时内存里的结果会丢失。
+	a.saveLearnedOffsetsIfDirty("suspend")
 
 	done := make(chan struct{})
 	a.safeGo("suspend-cleanup", func() {
@@ -520,6 +539,8 @@ func (a *CoreApp) onSupportedHIDArrival(devicePath string) {
 	}
 
 	a.logInfo("检测到飞智 HID 接口已就绪，立即触发设备重连: %s", devicePath)
+	// 接口刚出现时设备可能还没准备好，这次重连若失败，后续健康检查按快速节奏继续重试。
+	a.healthReconnectStreak.Store(0)
 	if !a.wakeReconnect() {
 		a.requestReconnect("hid-interface-arrival", []time.Duration{0})
 	}
@@ -559,6 +580,8 @@ func (a *CoreApp) handleSystemResume(source string, gap time.Duration, forceReco
 		a.suspendGeneration.Add(1)
 	}
 	a.cancelReconnect()
+	// 唤醒后设备可能需要一段时间重新枚举，健康检查的重连兜底先回到快速节奏。
+	a.healthReconnectStreak.Store(0)
 	forceReconnect = shouldReconnectAfterResume(
 		proactivelySuspended,
 		resumeReconnectWanted,

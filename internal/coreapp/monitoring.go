@@ -10,6 +10,8 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/bridge"
 	"github.com/TIANLI0/THRM/internal/ipc"
+	"github.com/TIANLI0/THRM/internal/laptopfan"
+	"github.com/TIANLI0/THRM/internal/rtss"
 	"github.com/TIANLI0/THRM/internal/smartcontrol"
 	"github.com/TIANLI0/THRM/internal/temperature"
 	"github.com/TIANLI0/THRM/internal/types"
@@ -95,6 +97,19 @@ func (a *CoreApp) temperatureSelection(cfg types.AppConfig) types.TemperatureSel
 	}
 }
 
+// useCompactBridgeSample 决定控温循环本次采样是否向桥接请求精简结果
+// （标量读数 + 多传感器平均所需的 CPU 传感器，不带完整传感器清单）。
+//
+// 这是唯一的判定点。没有 GUI 在看时，完整清单没有任何消费者：托盘提示、RTSS、历史、
+// 智能控温、功耗读数只用标量；清单由 temperature.Reader 用最近一次完整结果回填，
+// 刚连上的 GUI 通过 GetTemperature 仍能立刻拿到清单。有 GUI 时必须读完整结果——
+// 判定在 Read 之前，GUI 连上后的第一次采样就是完整的，配合 clientsJustConnected
+// 的整帧广播，新 GUI 拿到的是最新清单。
+// 散热收益测试（扩展传感器开启期间）要逐帧采集全部传感器，同样始终读完整结果。
+func useCompactBridgeSample(hasClients, extendedSensors bool) bool {
+	return !hasClients && !extendedSensors
+}
+
 // nextTemperatureEMA 计算窗口为 n 的温度 EMA（α = 2/(n+1)）。
 //
 // 必须用浮点累积：整数除法向下取整，升温时每步都被截掉一点，最终稳定在真实温度之下
@@ -116,12 +131,27 @@ func (a *CoreApp) recoverTemperatureBridge(reason string) {
 	})
 }
 
+// temperatureEventPayload 选择本帧温度事件的编码。
+//
+// fullFrame（刚有 GUI 连上或恢复订阅）发送完整数据；所有订阅中的客户端都能还原
+// 传感器读数时，清单不变的传感器组只发读数（ipc.CompactTemperatureEvent）；
+// 否则退回旧格式，只省略连读数都没变的清单。
+func temperatureEventPayload(current, previous types.TemperatureData, fullFrame, sensorValues bool) any {
+	if fullFrame {
+		return current
+	}
+	if sensorValues {
+		return ipc.CompactTemperatureEvent(current, previous)
+	}
+	return compactTemperatureEventPayload(current, previous)
+}
+
 // compactTemperatureEventPayload 去掉与上一帧完全相同的传感器清单，只广播变化的部分。
+// 这是旧格式：读数一变整份清单就要重发，只在有不认识 sensorValues 的旧客户端时使用。
 //
 // 这里用逐字段比较而不是 reflect.DeepEqual：这条路径在 GUI 打开时每个采样周期都要
 // 跑一遍，而传感器清单动辄几十项，反射比较要为每个元素的每个字段走一次反射调度，
-// 比直接比较慢一个数量级，且清单几乎总是相等（真正变化的只有 Value），
-// 也就是说每次都要走完最坏路径。
+// 比直接比较慢一个数量级。
 func compactTemperatureEventPayload(current, previous types.TemperatureData) types.TemperatureData {
 	compact := current
 	if temperatureSensorsEqual(current.CpuSensors, previous.CpuSensors) {
@@ -273,7 +303,8 @@ func (a *CoreApp) startTemperatureMonitoring() {
 
 	cfg, cfgRevision := a.configManager.GetWithRevision()
 	hasClients := a.ipcServer != nil && a.ipcServer.HasClients()
-	updateInterval := effectiveTemperatureMonitorInterval(cfg.TempUpdateRate, hasClients, cfg.AutoControl)
+	hasActiveClients := a.ipcServer != nil && a.ipcServer.HasActiveClients()
+	updateInterval := effectiveTemperatureMonitorInterval(cfg.TempUpdateRate, hasActiveClients, cfg.AutoControl)
 
 	// 温度采样使用 EMA 平滑。
 	sampleCount := max(cfg.TempSampleCount, 1)
@@ -290,8 +321,10 @@ func (a *CoreApp) startTemperatureMonitoring() {
 	lastTargetRPM := -1
 	lastDeviceGeneration := a.deviceManager.ConnectionGeneration()
 	settingsRefreshGeneration := uint64(0)
-	learningDirty := false
+	// 学习偏移每次合并都会立刻进入内存配置；这里只控制落盘与向 GUI 广播的频率。
+	learningUnbroadcast := false
 	lastLearningSave := time.Now()
+	lastLearningBroadcast := time.Now()
 	lastBridgeUpdateTime := initialTemp.UpdateTime
 	staleBridgeUpdateCount := 0
 	bridgeFailureCount := 0
@@ -300,6 +333,9 @@ func (a *CoreApp) startTemperatureMonitoring() {
 	lastBridgeRestart := time.Time{}
 	var smartCfg types.SmartControlConfig
 	smartCfgRevision := cfgRevision - 1
+	// cachedCfg 是最近一次按修订号取到的配置深拷贝。配置没变的周期直接复用它，
+	// 不再每个周期深拷贝整份配置（曲线方案、各方案学习偏移、散热收益报告……）。
+	cachedCfg, cachedCfgRevision := cfg, cfgRevision
 
 	// 每个曲线点对应一个稳态采样桶。
 	steadyObserver := smartcontrol.NewStableObserver(len(cfg.FanCurve))
@@ -320,13 +356,30 @@ func (a *CoreApp) startTemperatureMonitoring() {
 	}
 
 	prevHasClients := hasClients
+	prevHasActiveClients := hasActiveClients
 	var lastMemRelease time.Time
+	var laptopSpeeds laptopfan.FanSpeeds
+	laptopSpeedsOK := false
+	var lastLaptopFanRead time.Time
+	var activeClientsChanged <-chan struct{}
+	if a.ipcServer != nil {
+		activeClientsChanged = a.ipcServer.ActiveClientsChanged()
+	}
 
 monitorLoop:
 	for {
 		select {
 		case <-stop:
 			break monitorLoop
+		case <-activeClientsChanged:
+			// GUI 回到前台时，若正处在后台放慢的采样间隔里，立即补一次采样，界面不必
+			// 干等一个空闲周期才看到实时数据。只提前、不推迟；不更新 lastTimerReset，
+			// 休眠唤醒判定仍按真实的等待时长计算。智能控温开启时间隔本就未放慢，不受影响。
+			// HID 读循环也立即恢复常规轮询，下一次采样会按最新状态重新判定。
+			a.deviceManager.SetIdlePolling(false)
+			if updateInterval > temperatureMonitorInterval(cfg.TempUpdateRate) && timer.Stop() {
+				timer.Reset(0)
+			}
 		case <-timer.C:
 			now := time.Now()
 			gap := now.Sub(lastTimerReset)
@@ -349,17 +402,23 @@ monitorLoop:
 				a.logInfo("检测到设备重连（连接代次=%d），重置智能控温输出状态", deviceGeneration)
 			}
 
-			cfg, cfgRevision = a.configManager.GetWithRevision()
+			if a.configManager.Revision() != cachedCfgRevision {
+				cachedCfg, cachedCfgRevision = a.configManager.GetWithRevision()
+			}
+			// 浅拷贝：本周期对 cfg 字段的重新赋值不会带进缓存；其中的切片/映射在循环里只读。
+			cfg, cfgRevision = cachedCfg, cachedCfgRevision
 			if a.applyTimeCurveSchedule(cfg, now) {
 				// 刚切换了曲线方案：重取快照，本周期就按新曲线控温，后面也不会拿旧快照回写。
-				cfg, cfgRevision = a.configManager.GetWithRevision()
+				cachedCfg, cachedCfgRevision = a.configManager.GetWithRevision()
+				cfg, cfgRevision = cachedCfg, cachedCfgRevision
 			}
-			// 后台空闲（无 GUI 连接且未开启智能控温）时放慢采样：此时温度读取不驱动风扇，
+			// 后台空闲（无前台 GUI 且未开启智能控温）时放慢采样：此时温度读取不驱动风扇，
 			// 仅服务托盘提示与历史记录，降低采样频率可显著减少桥接传感器扫描带来的后台 CPU 占用。
+			// 窗口隐藏的 GUI 已退订高频事件，不消费遥测，与没有 GUI 同样对待。
 			hasClients = a.ipcServer != nil && a.ipcServer.HasClients()
-			updateInterval = effectiveTemperatureMonitorInterval(cfg.TempUpdateRate, hasClients, cfg.AutoControl)
-			// 同一个"空闲"判据也用于放慢 HID 读循环的空转轮询。
-			a.deviceManager.SetIdlePolling(!hasClients && !cfg.AutoControl)
+			hasActiveClients = a.ipcServer != nil && a.ipcServer.HasActiveClients()
+			updateInterval = effectiveTemperatureMonitorInterval(cfg.TempUpdateRate, hasActiveClients, cfg.AutoControl)
+			a.deviceManager.SetIdlePolling(hidIdlePollingAllowed(hasActiveClients, cfg.RTSS))
 			// GUI 断开瞬间把会话期间膨胀的堆内存归还操作系统，降低核心常驻后台时的 RSS。
 			if prevHasClients && !hasClients && now.Sub(lastMemRelease) > idleMemoryReleaseCooldown {
 				lastMemRelease = now
@@ -367,13 +426,23 @@ monitorLoop:
 			}
 			// 扩展传感器只为散热收益测试临时开启，而测试跑在 GUI 里。
 			a.releaseExtendedSensorsIfIdle(hasClients)
-			// 刚有 GUI 连上：它没收到过上一帧，差分掉的传感器清单对它来说就是缺失。
-			clientsJustConnected := hasClients && !prevHasClients
+			// 刚有 GUI 连上或恢复订阅：它没收到过上一帧，差分掉的传感器清单对它来说就是缺失。
+			clientsJustConnected := hasActiveClients && !prevHasActiveClients
 			prevHasClients = hasClients
+			prevHasActiveClients = hasActiveClients
 
-			temp := a.tempReader.Read(a.temperatureSelection(cfg))
+			selection := a.temperatureSelection(cfg)
+			selection.Compact = useCompactBridgeSample(hasActiveClients, selection.ExtendedSensors)
+			temp := a.tempReader.Read(selection)
 			// 补充笔记本内置风扇转速（机械革命等 Uniwill/同方准系统），不支持时保持 0。
-			if laptopSpeeds, ok := a.laptopFanReader.Read(); ok {
+			// 每次读取是两次 WMI ExecMethod。没有 GUI 时它只服务于温度历史（托盘、RTSS 不显示它），
+			// 因此只在历史本轮要记录样本、或上次读数已过旧时才读取，其余周期沿用上次读数。
+			// 【读取判据集中于此】GUI 最小化时不算活跃，同样按无 GUI 处理。
+			if laptopFanReadDue(hasActiveClients, a.tempHistory.SampleDue(temp), now.Sub(lastLaptopFanRead)) {
+				laptopSpeeds, laptopSpeedsOK = a.laptopFanReader.Read()
+				lastLaptopFanRead = now
+			}
+			if laptopSpeedsOK {
 				temp.CPUFanRPM = laptopSpeeds.CPUFanRPM
 				temp.GPUFanRPM = laptopSpeeds.GPUFanRPM
 			}
@@ -427,13 +496,10 @@ monitorLoop:
 
 			historyPoint, recorded := a.tempHistory.Add(temp, a.deviceManager.GetCurrentFanData())
 
-			// 广播温度更新（无 GUI 客户端时跳过差分与序列化，核心常驻后台时显著降低每秒开销）
-			if hasClients {
-				eventTemp := temp
-				if !clientsJustConnected {
-					eventTemp = compactTemperatureEventPayload(temp, previousTemp)
-				}
-				a.ipcServer.BroadcastEvent(ipc.EventTemperatureUpdate, eventTemp)
+			// 广播温度更新（无前台 GUI 时跳过差分与序列化，核心常驻后台时显著降低每秒开销）
+			if hasActiveClients {
+				sensorValues := a.ipcServer.ActiveClientsSupport(ipc.FeatureTemperatureSensorValues)
+				a.ipcServer.BroadcastEvent(ipc.EventTemperatureUpdate, temperatureEventPayload(temp, previousTemp, clientsJustConnected, sensorValues))
 				if recorded {
 					a.ipcServer.BroadcastEvent(ipc.EventTemperatureHistoryUpdate, historyPoint)
 				}
@@ -622,7 +688,8 @@ monitorLoop:
 									return true
 								})
 								if merged {
-									learningDirty = true
+									a.learnedOffsetsUnsaved.Store(true)
+									learningUnbroadcast = true
 								}
 							}
 						}
@@ -633,15 +700,18 @@ monitorLoop:
 				}
 
 				// 学习偏移在控温环里高频改写，每次都写盘既伤 SSD 也会拖慢采样周期。
-				if learningDirty && time.Since(lastLearningSave) >= 25*time.Second {
-					if err := a.configManager.Save(); err != nil {
-						a.logError("保存学习状态失败: %v", err)
-					} else {
-						lastLearningSave = time.Now()
-						learningDirty = false
-						if a.ipcServer != nil {
-							a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, a.configManager.Get())
-						}
+				// 落盘放慢到 learnedOffsetsSaveInterval；退出、系统挂起前、重置学习与切换方案
+				// 都会另行把内存中的配置整份落盘，不会因此丢失学习结果。
+				if a.learnedOffsetsUnsaved.Load() && time.Since(lastLearningSave) >= learnedOffsetsSaveInterval {
+					a.saveLearnedOffsetsIfDirty("periodic")
+					lastLearningSave = time.Now()
+				}
+				// GUI 展示学习后的曲线，广播仍保持原来的 25 秒节奏，不随落盘一起放慢。
+				if learningUnbroadcast && time.Since(lastLearningBroadcast) >= learnedOffsetsBroadcastInterval {
+					learningUnbroadcast = false
+					lastLearningBroadcast = time.Now()
+					if a.ipcServer != nil && a.ipcServer.HasClients() {
+						a.ipcServer.BroadcastEvent(ipc.EventConfigUpdate, a.configManager.Get())
 					}
 				}
 
@@ -658,11 +728,38 @@ monitorLoop:
 		}
 	}
 
-	if learningDirty {
-		if err := a.configManager.Save(); err != nil {
-			a.logError("退出监控时保存学习曲线失败: %v", err)
-		}
+	a.saveLearnedOffsetsIfDirty("monitor-exit")
+}
+
+const (
+	// learnedOffsetsSaveInterval 是学习偏移的周期性落盘间隔。每次落盘都是整份配置的
+	// 序列化 + fsync，学习活跃时原先每 25 秒一次。
+	learnedOffsetsSaveInterval = 3 * time.Minute
+	// learnedOffsetsBroadcastInterval 是学习偏移变化后向 GUI 广播配置的最小间隔。
+	learnedOffsetsBroadcastInterval = 25 * time.Second
+)
+
+// saveLearnedOffsetsIfDirty 把控温循环合并进内存、尚未落盘的学习偏移写盘。
+// 在周期保存、控温循环退出、系统挂起前与核心退出时调用；没有待保存内容时什么也不做。
+func (a *CoreApp) saveLearnedOffsetsIfDirty(reason string) {
+	if a.configManager == nil || !a.learnedOffsetsUnsaved.Swap(false) {
+		return
 	}
+	if err := a.configManager.Save(); err != nil {
+		// 保存失败：保留待保存标记，下一次时机再试。
+		a.learnedOffsetsUnsaved.Store(true)
+		a.logError("保存学习状态失败[%s]: %v", reason, err)
+	}
+}
+
+// laptopFanMaxAge 是无 GUI 时笔记本风扇读数可沿用的最长时间，与后台空闲采样间隔一致，
+// 使 GUI 刚连上时拿到的读数不比原先逐周期读取时更旧。
+const laptopFanMaxAge = idleTemperatureMonitorInterval
+
+// laptopFanReadDue 决定本周期是否读取笔记本风扇转速：有 GUI 时每周期都读；
+// 否则只在温度历史本轮要记录样本、或上次读数超过 laptopFanMaxAge 时读取。
+func laptopFanReadDue(hasClients, historySampleDue bool, sinceLastRead time.Duration) bool {
+	return hasClients || historySampleDue || sinceLastRead >= laptopFanMaxAge
 }
 
 func temperatureMonitorInterval(updateRateSeconds int) time.Duration {
@@ -681,6 +778,22 @@ func effectiveTemperatureMonitorInterval(updateRateSeconds int, hasClients, auto
 		return idleTemperatureMonitorInterval
 	}
 	return interval
+}
+
+// hidIdlePollingAllowed 决定 HID 读循环能否放慢到空闲轮询间隔（500ms）。
+//
+// 智能控温不需要快速轮询：控温环每个采样周期（≥1 秒）才读一次缓存的转速，
+// 下发转速时等 ACK 由设备层的事务标记即时唤醒读循环。需要亚秒级被动读数的只有
+// 前台 GUI 的实时转速，以及刷新间隔短于 1 秒的 RTSS 叠加层（500ms 轮询会让
+// 500ms 的刷新时而拖成 1 秒）。
+func hidIdlePollingAllowed(hasActiveClients bool, rtssCfg types.RTSSConfig) bool {
+	if hasActiveClients {
+		return false
+	}
+	if !rtssCfg.Enabled {
+		return true
+	}
+	return rtss.SupportedUpdateInterval(time.Duration(rtssCfg.UpdateIntervalMS)*time.Millisecond) >= time.Second
 }
 
 func shouldApplyRampLimit(targetRPM, prevTargetRPM int) bool {
@@ -838,6 +951,29 @@ func (a *CoreApp) ensureTemperatureMonitoringHealthy() {
 	a.ensureTemperatureMonitoring("health-check")
 }
 
+const (
+	// healthReconnectFastAttempts 是健康检查按原有 30 秒节奏连续重连的次数（约 3 分钟）。
+	healthReconnectFastAttempts = 6
+	// healthReconnectRelaxedInterval 是设备确实不在、且 HID 接口到达通知可用时的重连兜底间隔。
+	// 设备插入/重新配对会立刻触发到达通知并重连，这里只是通知丢失时的保底。
+	healthReconnectRelaxedInterval = 3 * time.Minute
+	// healthReconnectLogSummaryEvery 是连续重连失败时输出 Info 汇总的间隔（按次数）。
+	healthReconnectLogSummaryEvery = 20
+)
+
+// healthReconnectDue 决定本轮健康检查是否要触发重连。
+//
+// 只有同时满足以下条件才放慢：HID 接口到达通知已注册（Linux 上是桩实现，保持原节奏）、
+// 最近一次尝试连一个受支持的 HID 接口都没枚举到且不涉及 BS1 的 BLE 扫描（relaxable）、
+// 并且断线后已经按原节奏重试过 healthReconnectFastAttempts 次。
+func healthReconnectDue(streak int32, sinceLast time.Duration, arrivalNotify, relaxable bool) bool {
+	if !arrivalNotify || !relaxable || streak < healthReconnectFastAttempts {
+		return true
+	}
+	// 健康检查 30 秒一跳，留出余量，避免计时抖动导致整整多等一跳。
+	return sinceLast >= healthReconnectRelaxedInterval-5*time.Second
+}
+
 // checkDeviceHealth 检查设备健康状态
 func (a *CoreApp) checkDeviceHealth() {
 	a.mutex.RLock()
@@ -845,9 +981,38 @@ func (a *CoreApp) checkDeviceHealth() {
 	a.mutex.RUnlock()
 
 	if !connected {
-		a.logInfo("健康检查: 设备未连接，尝试重新连接")
-		a.requestReconnect("health-check", []time.Duration{0})
+		if a.reconnectInProgress.Load() {
+			// 断线/唤醒排定的重连流程仍在退避重试，本轮不计入健康检查的连续重连次数。
+			a.logDebug("健康检查: 设备未连接，重连流程已在进行中")
+			return
+		}
+		streak := a.healthReconnectStreak.Load()
+		sinceLast := time.Duration(math.MaxInt64)
+		if last := a.lastHealthReconnectUnixNano.Load(); last != 0 {
+			sinceLast = time.Since(time.Unix(0, last))
+		}
+		arrivalNotify := a.hidArrivalNotifyActive.Load()
+		relaxable := arrivalNotify && a.deviceManager.ReconnectPollingRelaxable()
+		if !healthReconnectDue(streak, sinceLast, arrivalNotify, relaxable) {
+			a.logDebug("健康检查: 设备未连接且未枚举到 HID 接口，由接口到达通知负责发现设备，放慢重连兜底（距上次 %v）",
+				sinceLast.Round(time.Second))
+			return
+		}
+		streak = a.healthReconnectStreak.Add(1)
+		a.lastHealthReconnectUnixNano.Store(time.Now().UnixNano())
+		// 连续失败只有第一次照常记录，之后降到 Debug，并定期输出一条 Info 汇总。
+		quiet := streak > 1
+		switch {
+		case !quiet:
+			a.logInfo("健康检查: 设备未连接，尝试重新连接")
+		case streak%healthReconnectLogSummaryEvery == 0:
+			a.logInfo("健康检查: 设备仍未连接，已连续 %d 次尝试重新连接", streak)
+		default:
+			a.logDebug("健康检查: 设备未连接，尝试重新连接（连续第 %d 次）", streak)
+		}
+		a.requestReconnectWithLogging("health-check", []time.Duration{0}, quiet)
 	} else {
+		a.healthReconnectStreak.Store(0)
 		// 验证设备实际连接状态
 		if !a.deviceManager.IsConnected() {
 			a.logError("健康检查: 检测到设备状态不一致，触发断开回调")

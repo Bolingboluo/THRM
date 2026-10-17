@@ -83,6 +83,14 @@ type CoreApp struct {
 
 	powerNotifyStop      func()
 	hidArrivalNotifyStop func()
+	// hidArrivalNotifyActive 表示 HID 接口到达通知已注册成功，健康检查据此放慢重连兜底。
+	hidArrivalNotifyActive atomic.Bool
+	// healthReconnectStreak 是健康检查连续发现设备未连接并触发重连的次数，
+	// lastHealthReconnectUnixNano 是最近一次由健康检查触发重连的时刻。
+	healthReconnectStreak       atomic.Int32
+	lastHealthReconnectUnixNano atomic.Int64
+	// learnedOffsetsUnsaved 表示控温循环已合并进内存配置、但尚未落盘的学习偏移。
+	learnedOffsetsUnsaved atomic.Bool
 
 	guiLastResponse   int64
 	guiMonitorEnabled bool

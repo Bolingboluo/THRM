@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"os"
@@ -25,8 +26,18 @@ const (
 	historyBinaryVersionLegacy   uint16 = 1
 	historyBinaryVersionPower    uint16 = 2
 	historyBinaryVersionFans     uint16 = 3 // v3: 追加笔记本内置 CPU/GPU 风扇转速
-	historyBinaryVersion         uint16 = 4 // v4: 追加时间轴事件
+	historyBinaryVersionEvents   uint16 = 4 // v4: 追加时间轴事件（整文件快照的最后一版）
+	historyBinaryVersion         uint16 = 5 // v5: 文件头之后是只追加的记录流
 	historyEnabledFlag           uint8  = 1
+
+	// v5 文件头与 v1–v4 布局相同：magic(4) version(2) flags(1) reserved(1)
+	// sampleInterval(4) count(4) updatedAt(8)。v5 的 count 只是压缩时的点数，读取时不使用。
+	historyHeaderSize = 24
+	// v5 记录：tag(1) + 载荷长度(4) + 载荷 + CRC32(4，覆盖 tag/长度/载荷)。
+	historyRecordOverhead   = 1 + 4 + 4
+	historyRecordPoint      = uint8(1)
+	historyRecordEvent      = uint8(2)
+	historyPointPayloadSize = 36 // timestamp + CPU/GPU 温度 + 风扇转速 + CPU/GPU 功耗 + 笔记本 CPU/GPU 风扇
 
 	dirtyFlushThreshold = 6
 	dirtyFlushInterval  = 30 * time.Second
@@ -60,16 +71,26 @@ type HistoryRecorder struct {
 
 	dirtyCount  int
 	lastFlushAt time.Time
-	payloadSeq  uint64     // 每次序列化递增，受 mutex 保护
-	flushMutex  sync.Mutex // 串行化磁盘写入，与 mutex 互不持有
-	writtenSeq  uint64     // 已落盘的最新快照序号，受 flushMutex 保护
-}
 
-// historyPayload 是一次序列化出的文件内容。序列化在 mutex 下、写盘在 flushMutex 下，
-// 两次写盘可能交错，seq 用来丢弃已经被更新快照覆盖的旧内容。
-type historyPayload struct {
-	data []byte
-	seq  uint64
+	// 落盘状态。
+	//
+	// 文件是"文件头 + 只追加的记录流"：每个新采样点/事件编码成一条记录攒在 pending 里，
+	// 落盘时只把这一小段追加到文件尾，而不是像 v4 那样每 30 秒把整个环形缓冲（24 小时
+	// 保留时约 600 KB）重写一遍。追加表达不了"删除"，所以清空、改保留时长、时钟回拨丢点
+	// 这几种情况置 needCompact，下一次落盘按内存快照整体重写（压缩）；文件里的记录数
+	// 超过 compactionLimitLocked 时同样压缩，把被环形缓冲挤掉的旧点清出去。
+	//
+	// 以下字段除 flushMutex 外都受 mutex 保护；flushMutex 串行化所有磁盘写入，
+	// "取走 pending"与"写盘"在同一把 flushMutex 之下完成，因此写入顺序与记录顺序一致，
+	// 不会出现旧内容覆盖新内容的情况。
+	flushMutex     sync.Mutex
+	pending        []byte // 尚未写入文件的记录
+	pendingRecords int
+	fileRecords    int  // 文件中（上次压缩以来）的记录数
+	needCompact    bool // 文件内容与"文件头 + 追加记录"的模型不一致，下次落盘必须整体重写
+	unsaved        bool // 内存里有尚未落盘的变化
+	writerActive   bool // 后台写盘协程正在运行
+	writeRequested bool // 后台协程运行期间又有新的写盘请求
 }
 
 func NewHistoryRecorder(filePath string, capacity int, sampleInterval time.Duration, logger types.Logger) *HistoryRecorder {
@@ -87,6 +108,8 @@ func NewHistoryRecorder(filePath string, capacity int, sampleInterval time.Durat
 		sampleInterval: sampleInterval,
 		enabled:        true,
 		points:         make([]types.TemperatureHistoryPoint, capacity),
+		// 文件还没按 v5 校验过（不存在、旧格式或损坏）之前不能往后追加。
+		needCompact: true,
 	}
 	recorder.load()
 	return recorder
@@ -98,12 +121,8 @@ func (r *HistoryRecorder) SetEnabled(enabled bool) error {
 	if !enabled {
 		r.clearLocked()
 	}
-	payload, err := r.serializeLocked()
 	r.mutex.Unlock()
-	if err != nil {
-		return err
-	}
-	return r.writeFile(payload)
+	return r.persist(true)
 }
 
 func (r *HistoryRecorder) IsEnabled() bool {
@@ -158,28 +177,14 @@ func (r *HistoryRecorder) SetRetentionHours(hours int) error {
 	r.applyLoadedPointsLocked(ordered)
 	// 保留窗口变了，事件的过期界限跟着变（缩短时要立刻丢弃窗口外的旧事件）。
 	r.pruneEventsLocked(0)
-	payload, err := r.serializeLocked()
 	r.mutex.Unlock()
-	if err != nil {
-		return err
-	}
-	return r.writeFile(payload)
+	return r.persist(true)
 }
 
+// Flush 同步把尚未落盘的记录写入文件：会等待正在进行的后台写盘结束，返回时内存中
+// 已记录的全部内容都已写到盘上。退出与系统挂起前调用。
 func (r *HistoryRecorder) Flush() error {
-	r.mutex.Lock()
-	if r.dirtyCount == 0 {
-		r.mutex.Unlock()
-		return nil
-	}
-	payload, err := r.serializeLocked()
-	r.dirtyCount = 0
-	r.lastFlushAt = time.Now()
-	r.mutex.Unlock()
-	if err != nil {
-		return err
-	}
-	return r.writeFile(payload)
+	return r.persist(false)
 }
 
 func (r *HistoryRecorder) Add(temp types.TemperatureData, fanData *types.FanData) (types.TemperatureHistoryPoint, bool) {
@@ -208,8 +213,6 @@ func (r *HistoryRecorder) Add(temp types.TemperatureData, fanData *types.FanData
 		GPUFanRPM: temp.GPUFanRPM,
 	}
 
-	var flushPayload historyPayload
-
 	r.mutex.Lock()
 	if !r.enabled {
 		r.mutex.Unlock()
@@ -235,25 +238,93 @@ func (r *HistoryRecorder) Add(temp types.TemperatureData, fanData *types.FanData
 		r.filled = true
 	}
 
+	r.queueRecordLocked(historyRecordPoint, func(buf []byte) []byte {
+		return appendHistoryPointPayload(buf, point)
+	})
+	r.markDirtyLocked()
+	r.mutex.Unlock()
+	return point, true
+}
+
+// queueRecordLocked 把一条新记录排进待追加队列。
+func (r *HistoryRecorder) queueRecordLocked(tag uint8, appendPayload func([]byte) []byte) {
+	r.unsaved = true
+	if r.filePath == "" {
+		return
+	}
+	r.pending = appendHistoryRecord(r.pending, tag, appendPayload)
+	r.pendingRecords++
+}
+
+// markDirtyLocked 累计一次变化，攒够一批（或距上次落盘足够久）时交给后台协程写盘。
+// 写盘不在调用方（控温循环）上进行：磁盘偶发卡顿（杀毒扫描、机械盘唤醒）不应拖住控温。
+func (r *HistoryRecorder) markDirtyLocked() {
 	r.dirtyCount++
 	now := time.Now()
-	if r.dirtyCount >= dirtyFlushThreshold || now.Sub(r.lastFlushAt) >= dirtyFlushInterval {
-		if payload, err := r.serializeLocked(); err == nil {
-			flushPayload = payload
-			r.dirtyCount = 0
-			r.lastFlushAt = now
-		} else {
-			r.logError("序列化温度历史失败: %v", err)
-		}
+	if r.dirtyCount < dirtyFlushThreshold && now.Sub(r.lastFlushAt) < dirtyFlushInterval {
+		return
 	}
-	r.mutex.Unlock()
+	r.dirtyCount = 0
+	r.lastFlushAt = now
+	if r.filePath == "" {
+		return
+	}
+	if r.writerActive {
+		r.writeRequested = true
+		return
+	}
+	r.writerActive = true
+	go r.backgroundWrite()
+}
 
-	if flushPayload.data != nil {
-		if err := r.writeFile(flushPayload); err != nil {
+func (r *HistoryRecorder) backgroundWrite() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			r.logError("温度历史后台写盘异常: %v", recovered)
+			r.mutex.Lock()
+			r.writerActive = false
+			r.writeRequested = false
+			r.mutex.Unlock()
+		}
+	}()
+	for {
+		if err := r.persist(false); err != nil {
 			r.logError("保存温度历史失败: %v", err)
 		}
+		r.mutex.Lock()
+		if !r.writeRequested {
+			r.writerActive = false
+			r.mutex.Unlock()
+			return
+		}
+		r.writeRequested = false
+		r.mutex.Unlock()
 	}
-	return point, true
+}
+
+// SampleDue 报告用 temp 调用 Add 时是否会记录一个新样本，只读、不改变记录器状态。
+// 采样前代价较高的附加读数（如笔记本风扇转速的 WMI 调用）据此只在真正要记录时才读取。
+//
+// 判定与 Add 保持一致；时钟回拨的情形直接返回 true（宁可多读一次，不漏记录）。
+func (r *HistoryRecorder) SampleDue(temp types.TemperatureData) bool {
+	if r == nil || (temp.CPUTemp <= 0 && temp.GPUTemp <= 0) {
+		return false
+	}
+	timestamp := normalizeTimestampMillis(temp.UpdateTime)
+	if timestamp <= 0 {
+		timestamp = time.Now().UnixMilli()
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if !r.enabled {
+		return false
+	}
+	rollback := historyClockRollbackTolerance.Milliseconds()
+	if r.lastSampleAt-timestamp > rollback && r.lastSampleAt-time.Now().UnixMilli() > rollback {
+		return true
+	}
+	return r.lastSampleAt <= 0 || timestamp-r.lastSampleAt >= r.sampleInterval.Milliseconds()
 }
 
 // discardAfterLocked 丢弃时间戳晚于 timestamp 的采样点与事件：时钟回拨后它们落在
@@ -267,6 +338,9 @@ func (r *HistoryRecorder) discardAfterLocked(timestamp int64) {
 		return e.Timestamp > timestamp
 	})
 	r.dirtyCount++
+	// 追加记录无法表达删除，下次落盘按内存快照整体重写。
+	r.needCompact = true
+	r.unsaved = true
 }
 
 // AddEvent 记录一次时间轴事件。返回落库后的事件与是否真的记录了。
@@ -285,8 +359,6 @@ func (r *HistoryRecorder) AddEvent(eventType, labelKey string) (types.TimelineEv
 		LabelKey:  labelKey,
 	}
 
-	var flushPayload historyPayload
-
 	r.mutex.Lock()
 	// 去重状态独立于 events 维护：关闭后台记录时事件不入缓冲，但重复通知
 	// （例如唤醒时 Windows 连发的两个电源事件）依然要折叠成一次，
@@ -303,27 +375,16 @@ func (r *HistoryRecorder) AddEvent(eventType, labelKey string) (types.TimelineEv
 
 	if r.enabled {
 		r.events = append(r.events, event)
+		// 按保留窗口/数量裁掉的旧事件留在文件里也无妨：加载时用同一规则再裁一遍，
+		// 结果与这里逐次裁剪完全一致，等下次压缩时再从文件中清除。
 		r.pruneEventsLocked(event.Timestamp)
 
-		r.dirtyCount++
-		now := time.Now()
-		if r.dirtyCount >= dirtyFlushThreshold || now.Sub(r.lastFlushAt) >= dirtyFlushInterval {
-			if payload, err := r.serializeLocked(); err == nil {
-				flushPayload = payload
-				r.dirtyCount = 0
-				r.lastFlushAt = now
-			} else {
-				r.logError("序列化温度历史失败: %v", err)
-			}
-		}
+		r.queueRecordLocked(historyRecordEvent, func(buf []byte) []byte {
+			return appendHistoryEventPayload(buf, event)
+		})
+		r.markDirtyLocked()
 	}
 	r.mutex.Unlock()
-
-	if flushPayload.data != nil {
-		if err := r.writeFile(flushPayload); err != nil {
-			r.logError("保存温度历史失败: %v", err)
-		}
-	}
 	return event, true
 }
 
@@ -472,6 +533,45 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 		return err
 	}
 
+	var points []types.TemperatureHistoryPoint
+	var events []types.TimelineEvent
+	fileRecords := 0
+	// clean 表示文件正好是"v5 文件头 + 完整记录流"，可以直接接着往后追加。
+	// 旧格式（v1–v4）与带残缺尾巴的文件都要在下次落盘时整体重写一次。
+	clean := false
+	if version >= historyBinaryVersion {
+		var torn bool
+		points, events, fileRecords, torn = decodeHistoryRecords(data[historyHeaderSize:])
+		clean = !torn
+		if torn && r.logger != nil {
+			// 断电或进程被杀时最后一条记录可能只写了一半，丢掉它即可，不影响之前的记录。
+			r.logger.Warn("温度历史文件尾部记录不完整，已忽略残缺部分（共读取 %d 条记录）", fileRecords)
+		}
+	} else {
+		var err error
+		points, events, err = decodeLegacyHistoryBody(reader, version, count)
+		if err != nil {
+			return err
+		}
+	}
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	r.enabled = flags&historyEnabledFlag != 0
+	if sampleIntervalSeconds > 0 {
+		r.sampleInterval = time.Duration(sampleIntervalSeconds) * time.Second
+	}
+	r.applyLoadedPointsLocked(points)
+	r.events = events
+	r.pruneEventsLocked(0)
+	r.fileRecords = fileRecords
+	r.needCompact = !clean
+	return nil
+}
+
+// decodeLegacyHistoryBody 解析 v1–v4 整文件快照格式的采样点与事件。
+func decodeLegacyHistoryBody(reader *bytes.Reader, version uint16, count uint32) ([]types.TemperatureHistoryPoint, []types.TimelineEvent, error) {
 	// count 直接来自文件，损坏时可以是任意 uint32。不校验就拿去 make，会在启动时
 	// 申请几十 GB，这种 OOM 无法 recover，之后每次启动都会崩。
 	recordSize := 20 // timestamp + CPU/GPU 温度 + 风扇转速
@@ -482,7 +582,7 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 		recordSize += 8
 	}
 	if uint64(count)*uint64(recordSize) > uint64(reader.Len()) {
-		return fmt.Errorf("history point count out of range: %d", count)
+		return nil, nil, fmt.Errorf("history point count out of range: %d", count)
 	}
 	points := make([]types.TemperatureHistoryPoint, 0, count)
 	for i := uint32(0); i < count; i++ {
@@ -493,33 +593,33 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 		var cpuPower float32
 		var gpuPower float32
 		if err := binary.Read(reader, binary.LittleEndian, &timestamp); err != nil {
-			return err
+			return nil, nil, err
 		}
 		if err := binary.Read(reader, binary.LittleEndian, &cpuTemp); err != nil {
-			return err
+			return nil, nil, err
 		}
 		if err := binary.Read(reader, binary.LittleEndian, &gpuTemp); err != nil {
-			return err
+			return nil, nil, err
 		}
 		if err := binary.Read(reader, binary.LittleEndian, &fanRPM); err != nil {
-			return err
+			return nil, nil, err
 		}
 		var cpuFanRPM int32
 		var gpuFanRPM int32
 		if version >= historyBinaryVersionPower {
 			if err := binary.Read(reader, binary.LittleEndian, &cpuPower); err != nil {
-				return err
+				return nil, nil, err
 			}
 			if err := binary.Read(reader, binary.LittleEndian, &gpuPower); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 		if version >= historyBinaryVersionFans {
 			if err := binary.Read(reader, binary.LittleEndian, &cpuFanRPM); err != nil {
-				return err
+				return nil, nil, err
 			}
 			if err := binary.Read(reader, binary.LittleEndian, &gpuFanRPM); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 		points = append(points, types.TemperatureHistoryPoint{
@@ -536,27 +636,27 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 
 	// v4 起在采样点之后追加时间轴事件。旧版本文件读到这里就结束，事件为空。
 	var events []types.TimelineEvent
-	if version >= historyBinaryVersion {
+	if version >= historyBinaryVersionEvents {
 		var eventCount uint32
 		if err := binary.Read(reader, binary.LittleEndian, &eventCount); err != nil {
-			return err
+			return nil, nil, err
 		}
 		if eventCount > timelineEventCapacity {
-			return fmt.Errorf("history event count out of range: %d", eventCount)
+			return nil, nil, fmt.Errorf("history event count out of range: %d", eventCount)
 		}
 		events = make([]types.TimelineEvent, 0, eventCount)
 		for i := uint32(0); i < eventCount; i++ {
 			var timestamp int64
 			if err := binary.Read(reader, binary.LittleEndian, &timestamp); err != nil {
-				return err
+				return nil, nil, err
 			}
 			eventType, err := readHistoryString(reader)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			labelKey, err := readHistoryString(reader)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			if eventType == "" || labelKey == "" {
 				continue
@@ -568,18 +668,7 @@ func (r *HistoryRecorder) loadBinaryData(data []byte) error {
 			})
 		}
 	}
-
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	r.enabled = flags&historyEnabledFlag != 0
-	if sampleIntervalSeconds > 0 {
-		r.sampleInterval = time.Duration(sampleIntervalSeconds) * time.Second
-	}
-	r.applyLoadedPointsLocked(points)
-	r.events = events
-	r.pruneEventsLocked(0)
-	return nil
+	return points, events, nil
 }
 
 // readHistoryString 读取 uint16 长度前缀的 UTF-8 字符串。
@@ -638,17 +727,20 @@ func (r *HistoryRecorder) pointCountLocked() int {
 	return r.next
 }
 
-func (r *HistoryRecorder) serializeLocked() (historyPayload, error) {
-	if r.filePath == "" {
-		return historyPayload{}, nil
-	}
+// compactionLimitLocked 是文件中允许累积的记录数上限：超过后下次落盘压缩重写。
+// 取保留容量的两倍，24 小时保留时文件在约 0.8–1.6 MB 之间，每天整体重写约一次。
+func (r *HistoryRecorder) compactionLimitLocked() int {
+	return 2 * (r.capacity + timelineEventCapacity)
+}
+
+// encodeSnapshotLocked 按当前内存状态编码完整的 v5 文件（压缩用），并返回其中的记录数。
+func (r *HistoryRecorder) encodeSnapshotLocked() ([]byte, int) {
 	pointCount := r.pointCountLocked()
 	var flags uint8
 	if r.enabled {
 		flags |= historyEnabledFlag
 	}
-	// header 24B + 每点 36B (timestamp, CPU/GPU temperature, fan RPM, CPU/GPU power, 笔记本 CPU/GPU 风扇)
-	buf := make([]byte, 0, len(historyBinaryMagic)+24+pointCount*36)
+	buf := make([]byte, 0, historyHeaderSize+pointCount*(historyRecordOverhead+historyPointPayloadSize)+len(r.events)*64)
 	buf = append(buf, historyBinaryMagic...)
 	buf = binary.LittleEndian.AppendUint16(buf, historyBinaryVersion)
 	buf = append(buf, flags, 0) // flags + reserved
@@ -656,14 +748,9 @@ func (r *HistoryRecorder) serializeLocked() (historyPayload, error) {
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(pointCount))
 	buf = binary.LittleEndian.AppendUint64(buf, uint64(time.Now().UnixMilli()))
 	appendPoint := func(p types.TemperatureHistoryPoint) {
-		buf = binary.LittleEndian.AppendUint64(buf, uint64(normalizeTimestampMillis(p.Timestamp)))
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.CPUTemp)))
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.GPUTemp)))
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.FanRPM)))
-		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(normalizeHistoryPower(p.CPUPower))))
-		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(normalizeHistoryPower(p.GPUPower))))
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.CPUFanRPM)))
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.GPUFanRPM)))
+		buf = appendHistoryRecord(buf, historyRecordPoint, func(b []byte) []byte {
+			return appendHistoryPointPayload(b, p)
+		})
 	}
 	if r.filled {
 		for _, p := range r.points[r.next:] {
@@ -677,15 +764,112 @@ func (r *HistoryRecorder) serializeLocked() (historyPayload, error) {
 			appendPoint(p)
 		}
 	}
-
-	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(r.events)))
 	for _, event := range r.events {
-		buf = binary.LittleEndian.AppendUint64(buf, uint64(normalizeTimestampMillis(event.Timestamp)))
-		buf = appendHistoryString(buf, event.Type)
-		buf = appendHistoryString(buf, event.LabelKey)
+		buf = appendHistoryRecord(buf, historyRecordEvent, func(b []byte) []byte {
+			return appendHistoryEventPayload(b, event)
+		})
 	}
-	r.payloadSeq++
-	return historyPayload{data: buf, seq: r.payloadSeq}, nil
+	return buf, pointCount + len(r.events)
+}
+
+// appendHistoryRecord 追加一条 v5 记录：tag + 载荷长度 + 载荷 + CRC32。
+// CRC 让加载时能识别断电留下的半条记录或被填零的尾部。
+func appendHistoryRecord(buf []byte, tag uint8, appendPayload func([]byte) []byte) []byte {
+	start := len(buf)
+	buf = append(buf, tag, 0, 0, 0, 0)
+	buf = appendPayload(buf)
+	binary.LittleEndian.PutUint32(buf[start+1:start+5], uint32(len(buf)-start-5))
+	return binary.LittleEndian.AppendUint32(buf, crc32.ChecksumIEEE(buf[start:]))
+}
+
+// appendHistoryPointPayload 与 v2–v4 的单点布局相同：timestamp, CPU/GPU 温度, 风扇转速,
+// CPU/GPU 功耗, 笔记本 CPU/GPU 风扇转速。
+func appendHistoryPointPayload(buf []byte, p types.TemperatureHistoryPoint) []byte {
+	buf = binary.LittleEndian.AppendUint64(buf, uint64(normalizeTimestampMillis(p.Timestamp)))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.CPUTemp)))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.GPUTemp)))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.FanRPM)))
+	buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(normalizeHistoryPower(p.CPUPower))))
+	buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(normalizeHistoryPower(p.GPUPower))))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(p.CPUFanRPM)))
+	return binary.LittleEndian.AppendUint32(buf, uint32(int32(p.GPUFanRPM)))
+}
+
+// appendHistoryEventPayload 与 v4 的单个事件布局相同：timestamp + 两个长度前缀字符串。
+func appendHistoryEventPayload(buf []byte, event types.TimelineEvent) []byte {
+	buf = binary.LittleEndian.AppendUint64(buf, uint64(normalizeTimestampMillis(event.Timestamp)))
+	buf = appendHistoryString(buf, event.Type)
+	return appendHistoryString(buf, event.LabelKey)
+}
+
+func decodeHistoryPointPayload(payload []byte) types.TemperatureHistoryPoint {
+	le := binary.LittleEndian
+	return types.TemperatureHistoryPoint{
+		Timestamp: normalizeTimestampMillis(int64(le.Uint64(payload[0:8]))),
+		CPUTemp:   int(int32(le.Uint32(payload[8:12]))),
+		GPUTemp:   int(int32(le.Uint32(payload[12:16]))),
+		FanRPM:    int(int32(le.Uint32(payload[16:20]))),
+		CPUPower:  normalizeHistoryPower(float64(math.Float32frombits(le.Uint32(payload[20:24])))),
+		GPUPower:  normalizeHistoryPower(float64(math.Float32frombits(le.Uint32(payload[24:28])))),
+		CPUFanRPM: int(int32(le.Uint32(payload[28:32]))),
+		GPUFanRPM: int(int32(le.Uint32(payload[32:36]))),
+	}
+}
+
+// decodeHistoryRecords 顺序解析 v5 记录流。遇到不完整、CRC 不符或无法解析的记录即停止，
+// 之前的记录照常返回，torn 置真：断电/崩溃只会损坏最后一次追加，不应拖累整份历史，
+// 更不能让启动失败。records 是成功解析的记录数（含跳过的未知类型）。
+func decodeHistoryRecords(body []byte) (points []types.TemperatureHistoryPoint, events []types.TimelineEvent, records int, torn bool) {
+	le := binary.LittleEndian
+	offset := 0
+	for offset < len(body) {
+		remaining := len(body) - offset
+		if remaining < historyRecordOverhead {
+			return points, events, records, true
+		}
+		tag := body[offset]
+		length := le.Uint32(body[offset+1 : offset+5])
+		if tag == 0 || uint64(length) > uint64(remaining-historyRecordOverhead) {
+			return points, events, records, true
+		}
+		end := offset + 5 + int(length)
+		if crc32.ChecksumIEEE(body[offset:end]) != le.Uint32(body[end:end+4]) {
+			return points, events, records, true
+		}
+		payload := body[offset+5 : end]
+		switch tag {
+		case historyRecordPoint:
+			if len(payload) != historyPointPayloadSize {
+				return points, events, records, true
+			}
+			points = append(points, decodeHistoryPointPayload(payload))
+		case historyRecordEvent:
+			if len(payload) < 8 {
+				return points, events, records, true
+			}
+			reader := bytes.NewReader(payload[8:])
+			eventType, err := readHistoryString(reader)
+			if err != nil {
+				return points, events, records, true
+			}
+			labelKey, err := readHistoryString(reader)
+			if err != nil {
+				return points, events, records, true
+			}
+			if eventType != "" && labelKey != "" {
+				events = append(events, types.TimelineEvent{
+					Timestamp: normalizeTimestampMillis(int64(le.Uint64(payload[0:8]))),
+					Type:      eventType,
+					LabelKey:  labelKey,
+				})
+			}
+		default:
+			// 未知记录类型（更新的版本写入）：校验通过就跳过，不影响其余记录。
+		}
+		records++
+		offset = end + 4
+	}
+	return points, events, records, false
 }
 
 // appendHistoryString 以 uint16 长度前缀写入字符串。
@@ -697,35 +881,104 @@ func appendHistoryString(buf []byte, value string) []byte {
 	return append(buf, value...)
 }
 
-// writeFile 在锁外执行磁盘 IO。flushMutex 串行化多次并发 Flush 调用。
-func (r *HistoryRecorder) writeFile(payload historyPayload) error {
-	if payload.data == nil || r.filePath == "" {
+// persist 把内存中尚未落盘的变化写入文件，在调用方协程上同步完成。
+//
+// 常态下只把 pending 里攒下的几条记录追加到文件尾；needCompact、force 或文件记录数
+// 超过上限时按内存快照整体重写。"取走待写内容"与"写盘"都在 flushMutex 之下，
+// 并发的 Flush 与后台写盘因此严格按顺序落盘，返回时调用前记录的内容必然已经在盘上。
+func (r *HistoryRecorder) persist(force bool) error {
+	if r.filePath == "" {
 		return nil
 	}
 	r.flushMutex.Lock()
 	defer r.flushMutex.Unlock()
 
-	// 序列化与写盘之间不持有 mutex，更晚序列化的快照可能先写完（例如 SetEnabled(false)
-	// 清空后，一次早先开始的 Add 又把旧的启用态写回去），此时旧快照必须丢弃。
-	if payload.seq <= r.writtenSeq {
+	r.mutex.Lock()
+	if !force && !r.unsaved {
+		r.mutex.Unlock()
 		return nil
 	}
+	compact := force || r.needCompact || r.fileRecords+r.pendingRecords > r.compactionLimitLocked()
+	var data []byte
+	var records int
+	if compact {
+		data, records = r.encodeSnapshotLocked()
+	} else {
+		data, records = r.pending, r.pendingRecords
+	}
+	r.pending = nil
+	r.pendingRecords = 0
+	r.needCompact = false
+	r.unsaved = false
+	r.dirtyCount = 0
+	r.lastFlushAt = time.Now()
+	r.mutex.Unlock()
+
+	var err error
+	if compact {
+		err = r.replaceFile(data)
+	} else if err = r.appendFile(data); err != nil {
+		// 追加失败后文件尾部状态未知（可能只写进去半条），也可能文件已被删除：
+		// 立刻按内存快照整体重写，内存里的数据是完整的。
+		r.mutex.Lock()
+		data, records = r.encodeSnapshotLocked()
+		r.pending = nil
+		r.pendingRecords = 0
+		r.unsaved = false
+		r.mutex.Unlock()
+		compact = true
+		err = r.replaceFile(data)
+	}
+
+	r.mutex.Lock()
+	switch {
+	case err != nil:
+		// 盘上状态不可信，下次（攒够一批或 Flush 时）整体重写。
+		r.needCompact = true
+		r.unsaved = true
+	case compact:
+		r.fileRecords = records
+	default:
+		r.fileRecords += records
+	}
+	r.mutex.Unlock()
+	return err
+}
+
+// appendFile 把记录追加到已有的 v5 文件尾。文件不存在时报错而不是新建：
+// 没有文件头的记录流无法加载，交给调用方改走整体重写。
+func (r *HistoryRecorder) appendFile(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	file, err := os.OpenFile(r.filePath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// replaceFile 用临时文件 + 重命名整体替换历史文件（压缩/迁移/清空时使用）。
+func (r *HistoryRecorder) replaceFile(data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(r.filePath), 0755); err != nil {
 		return err
 	}
 	tmpPath := r.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, payload.data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return err
 	}
 	// os.Rename 在 Windows 上也会直接替换已存在的目标；先删目标会留出一段没有
 	// history.bin 的窗口，这时崩溃或断电就丢掉全部历史。
 	if err := os.Rename(tmpPath, r.filePath); err != nil {
 		_ = os.Remove(tmpPath)
-		if err := os.WriteFile(r.filePath, payload.data, 0644); err != nil {
+		if err := os.WriteFile(r.filePath, data, 0644); err != nil {
 			return err
 		}
 	}
-	r.writtenSeq = payload.seq
 	return nil
 }
 

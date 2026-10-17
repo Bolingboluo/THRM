@@ -191,15 +191,17 @@ export const appendHistoryPoint = (
   }
 
   // 快路径：数组本身已按时间有序且逐点归一化过，直接追加/替换末尾，再从头部裁剪过期点。
-  const next = last && last.timestamp === normalized.timestamp
-    ? [...points.slice(0, -1), normalized]
-    : [...points, normalized];
-
+  // 先算出头部要裁掉几个，再一次 slice 出结果：24 小时窗口下数组有 1.7 万点，
+  // 每 5 秒一次的追加不该先整表展开、再整表切片地复制两遍。
+  if (limit <= 0) return [];
+  const keep = last && last.timestamp === normalized.timestamp ? points.length - 1 : points.length;
   const cutoffTimestamp = Math.max(0, normalized.timestamp - retentionMs);
   let start = 0;
-  while (start < next.length && next[start].timestamp < cutoffTimestamp) start++;
-  if (next.length - start > limit) start = next.length - limit;
-  return start > 0 ? next.slice(start) : next;
+  while (start < keep && points[start].timestamp < cutoffTimestamp) start++;
+  if (keep - start + 1 > limit) start = keep + 1 - limit;
+  const next = points.slice(start, keep);
+  next.push(normalized);
+  return next;
 };
 
 // 新点比最新记录早超过该值即视为系统时钟回拨。

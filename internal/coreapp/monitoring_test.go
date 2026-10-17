@@ -152,3 +152,20 @@ func TestTemperatureEMAConvergesOnRisingStep(t *testing.T) {
 		}
 	}
 }
+
+// 精简桥接读取只在没有 GUI 时使用；散热收益测试（扩展传感器）期间始终读完整清单。
+func TestUseCompactBridgeSample(t *testing.T) {
+	cases := []struct {
+		hasClients, extended, want bool
+	}{
+		{hasClients: false, extended: false, want: true},
+		{hasClients: true, extended: false, want: false},
+		{hasClients: false, extended: true, want: false},
+		{hasClients: true, extended: true, want: false},
+	}
+	for _, c := range cases {
+		if got := useCompactBridgeSample(c.hasClients, c.extended); got != c.want {
+			t.Fatalf("useCompactBridgeSample(%v, %v) = %v, want %v", c.hasClients, c.extended, got, c.want)
+		}
+	}
+}

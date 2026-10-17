@@ -84,7 +84,7 @@ func (a *CoreApp) CycleFanCurveProfile() (types.FanCurveProfile, error) {
 	storeSmartControlOffsetsForActiveProfile(&cfg)
 
 	if len(cfg.FanCurveProfiles) == 0 {
-		return types.FanCurveProfile{}, fmt.Errorf("暂无可用温控曲线方案")
+		return types.FanCurveProfile{}, errNoCurveProfiles
 	}
 
 	idx := max(curveprofiles.FindIndex(cfg.FanCurveProfiles, cfg.ActiveFanCurveProfileID), 0)

@@ -3,8 +3,8 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import i18n, { type Resource } from "i18next";
 import { I18nextProvider, initReactI18next } from "react-i18next";
-import enUS from "../locales/en-US/translation.json";
-import jaJP from "../locales/ja-JP/translation.json";
+// 只有默认语言（同时是 fallbackLng）随主包静态打包，其它语言按需加载，
+// 避免每次冷启动都解析三份完整词条。
 import zhCN from "../locales/zh-CN/translation.json";
 
 export const SUPPORTED_LOCALES = ["zh-CN", "en-US", "ja-JP"] as const;
@@ -15,9 +15,43 @@ const LOCALE_STORAGE_KEY = "thrm.locale";
 
 const resources: Resource = {
   "zh-CN": { translation: zhCN },
-  "en-US": { translation: enUS },
-  "ja-JP": { translation: jaJP },
 };
+
+type LocaleBundle = Record<string, unknown>;
+
+const LOCALE_LOADERS: Partial<Record<AppLocale, () => Promise<{ default: LocaleBundle }>>> = {
+  "en-US": () => import("../locales/en-US/translation.json"),
+  "ja-JP": () => import("../locales/ja-JP/translation.json"),
+};
+
+const pendingLocaleLoads = new Map<AppLocale, Promise<void>>();
+
+/**
+ * 确保某个语言的词条已注册到 i18next。已就绪时返回 null（可同步切换），
+ * 否则返回加载中的 Promise；加载失败时 reject，调用方照常切换即可——
+ * 缺失的词条会按 fallbackLng 回退到默认语言，与原先缺词时的表现一致。
+ */
+function ensureLocaleLoaded(locale: AppLocale): Promise<void> | null {
+  const loader = LOCALE_LOADERS[locale];
+  if (!loader || i18n.hasResourceBundle(locale, "translation")) {
+    return null;
+  }
+
+  let pending = pendingLocaleLoads.get(locale);
+  if (!pending) {
+    pending = loader().then(
+      (mod) => {
+        i18n.addResourceBundle(locale, "translation", mod.default, true, true);
+      },
+      (error: unknown) => {
+        pendingLocaleLoads.delete(locale);
+        throw error;
+      },
+    );
+    pendingLocaleLoads.set(locale, pending);
+  }
+  return pending;
+}
 
 function normalizeLocale(value?: string | null): AppLocale {
   if (!value) {
@@ -95,35 +129,71 @@ if (!i18n.isInitialized) {
   });
 }
 
+// 模块一求值就开始拉取用户偏好的语言包，与页面水合、核心初始化并行，
+// 等界面需要显示文字时基本已就绪。
+if (typeof window !== "undefined") {
+  ensureLocaleLoaded(readPreferredLocale())?.catch(() => {});
+}
+
 type LocaleContextValue = {
   locale: AppLocale;
   setLocale: (locale: AppLocale) => void;
   supportedLocales: readonly AppLocale[];
+  /** 启动时偏好语言的词条已加载并生效；之后运行时切换语言不会再变回 false。 */
+  localeReady: boolean;
 };
 
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
 export function AppI18nProvider({ children }: { children: React.ReactNode }) {
+  // locale 是已经生效的语言；requestedLocale 是想切到的语言（词条可能还在加载）。
   const [locale, setLocaleState] = useState<AppLocale>(DEFAULT_LOCALE);
+  const [requestedLocale, setRequestedLocale] = useState<AppLocale | null>(null);
+  const [localeReady, setLocaleReady] = useState(false);
 
   useEffect(() => {
-    setLocaleState(readPreferredLocale());
+    setRequestedLocale(readPreferredLocale());
   }, []);
 
   useEffect(() => {
-    syncDocumentLocale(locale);
-    syncDocumentMetadata(locale);
-    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
-    void i18n.changeLanguage(locale);
-  }, [locale]);
+    if (!requestedLocale) {
+      return;
+    }
+
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, requestedLocale);
+
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) {
+        return;
+      }
+      void i18n.changeLanguage(requestedLocale);
+      syncDocumentLocale(requestedLocale);
+      syncDocumentMetadata(requestedLocale);
+      setLocaleState(requestedLocale);
+      setLocaleReady(true);
+    };
+
+    const pending = ensureLocaleLoaded(requestedLocale);
+    if (pending) {
+      pending.then(apply, apply);
+    } else {
+      apply();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedLocale]);
 
   const value = useMemo<LocaleContextValue>(
     () => ({
       locale,
-      setLocale: (nextLocale) => setLocaleState(normalizeLocale(nextLocale)),
+      setLocale: (nextLocale) => setRequestedLocale(normalizeLocale(nextLocale)),
       supportedLocales: SUPPORTED_LOCALES,
+      localeReady,
     }),
-    [locale],
+    [locale, localeReady],
   );
 
   return (

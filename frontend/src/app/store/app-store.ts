@@ -5,10 +5,15 @@ import { configService } from '../services/config-service';
 import { deviceService, type DeviceStatusPayload } from '../services/device-service';
 import {
   appendSampledHistoryPoint,
+  clampHistoryRetentionHours,
   createLiveHistoryPoint,
+  DEFAULT_HISTORY_RETENTION_HOURS,
+  HISTORY_SAMPLE_INTERVAL_MS,
   mergeTimelineEvents,
+  normalizeHistoryPoint,
   SESSION_HISTORY_LIMIT,
   SESSION_HISTORY_RETENTION_MS,
+  trimHistoryPoints,
 } from '../lib/temperature-history';
 import type { TemperatureHistoryPoint, TimelineEvent } from '../lib/temperature-history';
 import { i18n } from '../lib/i18n';
@@ -41,6 +46,41 @@ const isCoreServiceFailureDetail = (detail?: string) => {
     normalized.includes('服务');
 };
 
+/**
+ * 把 next 里与 prev 内容相同的子数组/子对象换成 prev 的引用；整体都相同时直接返回 prev。
+ *
+ * GUI 进程每次推送温度都会把完整的传感器清单重新合并一遍，清单内容没变也是新数组，
+ * 依赖它们的 useMemo 与下拉选项便每次推送都重算。换回旧引用后，订阅者按引用比较即可
+ * 跳过没有变化的部分。就地替换 next 的字段：它是刚解析出来的事件载荷，没有别人持有。
+ */
+function reuseEqualStructure<T>(prev: unknown, next: T): T {
+  if (Object.is(prev, next)) return prev as T;
+  if (typeof next !== 'object' || next === null || typeof prev !== 'object' || prev === null) return next;
+  if (Array.isArray(next) !== Array.isArray(prev)) return next;
+
+  const prevRecord = prev as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  const keys = Object.keys(nextRecord);
+  let same = keys.length === Object.keys(prevRecord).length;
+  for (const key of keys) {
+    const reused = reuseEqualStructure(prevRecord[key], nextRecord[key]);
+    if (reused !== nextRecord[key]) nextRecord[key] = reused;
+    if (same && (!Object.is(reused, prevRecord[key]) || !(key in prevRecord))) same = false;
+  }
+  return same ? (prev as T) : next;
+}
+
+// 一小时可容纳的样本数（按固定采样间隔换算），用于把保留小时数换算成点数上限。
+const HISTORY_POINTS_PER_HOUR = Math.round((60 * 60 * 1000) / HISTORY_SAMPLE_INTERVAL_MS);
+
+// 核心历史的裁剪窗口。minIntervalMs 为 0：核心推来的点已经按采样间隔筛过，
+// 这里只借 appendSampledHistoryPoint 处理系统时钟回拨（丢掉落在"未来"的点，与核心一致）。
+const coreHistoryWindow = (hours: number) => ({
+  retentionMs: hours * 60 * 60 * 1000,
+  limit: hours * HISTORY_POINTS_PER_HOUR,
+  minIntervalMs: 0,
+});
+
 type ActiveTab = 'status' | 'curve' | 'control' | 'about';
 export type CurveFocusTarget = 'curve-editor' | 'history-details';
 // labelKey 为 i18n 键（在 FanCurve 时间线渲染时翻译）；不再存储已本地化的字面量，保证跟随语言切换。
@@ -62,6 +102,11 @@ interface AppStore {
   activeTab: ActiveTab;
   curveFocusTarget: CurveFocusTarget | null;
   sessionHistoryPoints: TemperatureHistoryPoint[];
+  // 核心记录的后台温度历史，全应用共用一份：首页与曲线页不再各自整表下载、各持一份数组。
+  historyPoints: TemperatureHistoryPoint[];
+  historyEnabled: boolean;
+  historyRetentionHours: number;
+  historySaving: boolean;
   timelineEvents: TimelineEvent[];
 
   setActiveTab: (tab: ActiveTab) => void;
@@ -69,8 +114,12 @@ interface AppStore {
   clearCurveFocusTarget: () => void;
   clearBridgeWarning: () => void;
   handleTemperaturePayload: (data: types.TemperatureData | null) => void;
-  appendSessionHistoryPoint: (data: types.TemperatureData | null) => void;
+  appendSessionHistoryPoint: (data: types.TemperatureData | null, fanRpm?: number) => void;
   mergeTimelineEvents: (events: TimelineEvent[] | null | undefined) => void;
+  ensureTemperatureHistoryLoaded: () => void;
+  loadTemperatureHistory: () => Promise<void>;
+  setTemperatureHistoryEnabled: (enabled: boolean) => Promise<void>;
+  setTemperatureHistoryRetentionHours: (hours: number) => Promise<void>;
 
   initializeApp: () => Promise<void>;
   resyncCore: () => Promise<void>;
@@ -83,6 +132,14 @@ interface AppStore {
 
 // resyncCore 的重入哨兵，见该方法注释。
 let resyncInFlight = false;
+
+// 历史快照是否成功拉取过：只在第一次有组件用到历史时整表下载，之后靠实时推送续上。
+// 失败时保持 false，下一个用到历史的组件挂载时再试（与原先每次挂载都拉取的兜底一致）。
+let historyLoaded = false;
+// 只采用最后一次发起的拉取结果，先发后至的旧快照直接丢弃。
+let historyLoadSeq = 0;
+// 拉取快照期间到达的实时点：快照可能是在它们之前生成的，落定后要补回末尾。null 表示没有在拉取。
+let historyLoadBuffer: unknown[] | null = null;
 
 export const useAppStore = create<AppStore>((set, get) => ({
   isConnected: false,
@@ -100,6 +157,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'status',
   curveFocusTarget: null,
   sessionHistoryPoints: [],
+  historyPoints: [],
+  historyEnabled: false,
+  historyRetentionHours: DEFAULT_HISTORY_RETENTION_HOURS,
+  historySaving: false,
   timelineEvents: [],
 
   setActiveTab: (tab) => set({ activeTab: tab, curveFocusTarget: null }),
@@ -113,12 +174,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   handleTemperaturePayload: (data) => {
     const bridgeMessage = data?.bridgeMessage?.trim() ?? '';
     set({
-      temperature: data,
+      temperature: reuseEqualStructure(get().temperature, data),
       bridgeWarning: data?.bridgeOk === false ? bridgeMessage || getBridgeWarningMessage() : null,
     });
   },
 
-  appendSessionHistoryPoint: (data) => {
+  // fanRpm 缺省取 store 里的转速；窗口隐藏期间 store 不更新遥测，由调用方传入最新值。
+  appendSessionHistoryPoint: (data, fanRpm) => {
     if (!data) return;
 
     const point = createLiveHistoryPoint({
@@ -129,7 +191,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       gpuPower: data.gpuPower,
       cpuFanRpm: (data as { cpuFanRpm?: number }).cpuFanRpm,
       gpuFanRpm: (data as { gpuFanRpm?: number }).gpuFanRpm,
-    }, Number(get().fanData?.currentRpm || 0));
+    }, Number((fanRpm ?? get().fanData?.currentRpm) || 0));
 
     if (!point) return;
 
@@ -145,6 +207,73 @@ export const useAppStore = create<AppStore>((set, get) => ({
   mergeTimelineEvents: (events) => {
     if (!events || events.length === 0) return;
     set((state) => ({ timelineEvents: mergeTimelineEvents(state.timelineEvents, events) }));
+  },
+
+  ensureTemperatureHistoryLoaded: () => {
+    if (historyLoaded || historyLoadBuffer !== null) return;
+    void get().loadTemperatureHistory();
+  },
+
+  loadTemperatureHistory: async () => {
+    const seq = ++historyLoadSeq;
+    if (historyLoadBuffer === null) historyLoadBuffer = [];
+    try {
+      const payload = await apiService.getTemperatureHistory();
+      if (seq !== historyLoadSeq) return;
+      const buffered = historyLoadBuffer ?? [];
+      historyLoadBuffer = null;
+
+      const enabled = payload?.enabled !== false;
+      const retentionHours = clampHistoryRetentionHours(payload?.retentionHours);
+      const historyWindow = coreHistoryWindow(retentionHours);
+      let points = enabled
+        ? trimHistoryPoints((payload?.points || []) as TemperatureHistoryPoint[], historyWindow.retentionMs, historyWindow.limit)
+        : [];
+      if (enabled) {
+        for (const raw of buffered) {
+          const point = normalizeHistoryPoint(raw as TemperatureHistoryPoint);
+          const last = points[points.length - 1];
+          if (point && (!last || point.timestamp > last.timestamp)) {
+            points = appendSampledHistoryPoint(points, point, historyWindow);
+          }
+        }
+      }
+
+      historyLoaded = true;
+      set({ historyEnabled: enabled, historyRetentionHours: retentionHours, historyPoints: points });
+      // 补齐界面关闭期间核心记下的断连/唤醒标记，否则曲线有一小时、标记只有几分钟。
+      get().mergeTimelineEvents((payload?.events || []) as TimelineEvent[]);
+    } catch {
+      if (seq !== historyLoadSeq) return;
+      historyLoadBuffer = null;
+      // 读不到核心历史时退回会话内采样。
+      set({ historyEnabled: false, historyPoints: [] });
+    }
+  },
+
+  setTemperatureHistoryEnabled: async (enabled) => {
+    set({ historySaving: true });
+    try {
+      await apiService.setTemperatureHistoryEnabled(enabled);
+      await get().loadTemperatureHistory();
+    } catch (error) {
+      console.error('设置温度历史失败:', error);
+    } finally {
+      set({ historySaving: false });
+    }
+  },
+
+  setTemperatureHistoryRetentionHours: async (hours) => {
+    const clamped = clampHistoryRetentionHours(hours);
+    set({ historySaving: true });
+    try {
+      await apiService.setTemperatureHistoryRetentionHours(clamped);
+      await get().loadTemperatureHistory();
+    } catch (error) {
+      console.error('设置温度历史保留时长失败:', error);
+    } finally {
+      set({ historySaving: false });
+    }
   },
 
   initializeApp: async () => {
@@ -214,6 +343,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
 
       get().handleTemperaturePayload(deviceStatus.temperature || null);
+      // IPC 断开期间核心照常记录，但实时推送没送到界面：重新拉一次快照补上这段。
+      if (historyLoaded) void get().loadTemperatureHistory();
     } catch (error) {
       console.error('核心状态重同步失败:', error);
     } finally {
@@ -264,11 +395,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
     let telemetryTimer: number | null = null;
     let pendingFanData: types.FanData | null | undefined;
     let pendingTemperature: types.TemperatureData | null | undefined;
+    // 窗口隐藏期间收到的历史点，可见后再一次性补上（或改为重新拉取快照，见 handleVisibilityChange）。
+    let hiddenHistoryPoints: unknown[] = [];
+    let hiddenSince: number | null = document.hidden ? performance.now() : null;
+    // 窗口隐藏（最小化、收进托盘）时界面看不见，不再把遥测写进 store 触发重渲染：
+    // 只留着最新一份，重新可见时立刻应用一次。噪音测试、散热收益测试自己向核心取转速，不读这里。
     const flushTelemetry = () => {
-      telemetryTimer = null;
+      if (telemetryTimer !== null) {
+        window.clearTimeout(telemetryTimer);
+        telemetryTimer = null;
+      }
+      if (document.hidden) return;
       if (pendingFanData !== undefined) {
-        set({ fanData: pendingFanData });
+        const previous = get().fanData;
+        const next = reuseEqualStructure(previous, pendingFanData);
         pendingFanData = undefined;
+        // 转速推送每秒最多 4 次，内容完全没变时不写 store，首页与徽标就不必跟着重渲染。
+        if (next !== previous) set({ fanData: next });
       }
       if (pendingTemperature !== undefined) {
         const data = pendingTemperature;
@@ -278,13 +421,52 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }
     };
     const scheduleTelemetryFlush = () => {
-      if (telemetryTimer !== null) return;
-      telemetryTimer = window.setTimeout(flushTelemetry, document.hidden ? 1000 : 200);
+      if (telemetryTimer !== null || document.hidden) return;
+      telemetryTimer = window.setTimeout(flushTelemetry, 200);
     };
+    const applyHistoryPoint = (point: unknown) => {
+      if (!get().historyEnabled) return;
+      set((state) => {
+        const next = appendSampledHistoryPoint(
+          state.historyPoints,
+          point as TemperatureHistoryPoint,
+          coreHistoryWindow(state.historyRetentionHours),
+        );
+        return next === state.historyPoints ? state : { historyPoints: next };
+      });
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        hiddenSince ??= performance.now();
+        if (telemetryTimer !== null) {
+          window.clearTimeout(telemetryTimer);
+          telemetryTimer = null;
+        }
+        return;
+      }
+
+      const hiddenFor = hiddenSince === null ? 0 : performance.now() - hiddenSince;
+      hiddenSince = null;
+      flushTelemetry();
+
+      const buffered = hiddenHistoryPoints;
+      hiddenHistoryPoints = [];
+      // 隐藏期间 GUI 进程可能不再转发高频事件，历史点会缺一段；隐藏超过一个采样间隔就
+      // 重新拉一次快照（核心那边一直在记），否则曲线上会多出一段"记录中断"。
+      if (hiddenFor >= HISTORY_SAMPLE_INTERVAL_MS && historyLoaded && get().historyEnabled) {
+        void get().loadTemperatureHistory();
+        return;
+      }
+      buffered.forEach(applyHistoryPoint);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    unsubscribers.push(() => document.removeEventListener('visibilitychange', handleVisibilityChange));
 
     unsubscribers.push(
       apiService.onCoreServiceError((message) => {
         const coreServiceError = getCoreServiceErrorMessage(message);
+        // 隐藏期间攒下的旧转速不能在恢复可见时把这里清空的 fanData 又写回去。
+        pendingFanData = undefined;
         set({
           coreServiceError,
           error: coreServiceError,
@@ -338,6 +520,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     unsubscribers.push(
       deviceService.onDeviceDisconnected(() => {
         console.log('设备已断开');
+        pendingFanData = undefined;
         set({ isConnected: false, deviceProductId: null, deviceModel: null, deviceSettings: null, fanData: null });
       })
     );
@@ -373,7 +556,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
     unsubscribers.push(
       deviceService.onTemperatureUpdate((data) => {
         pendingTemperature = data;
+        if (document.hidden) {
+          // 会话内历史（核心历史关闭时首页与详情页用它）隐藏期间照常采样，可见后曲线才是连续的。
+          const fanRpm = pendingFanData !== undefined ? pendingFanData?.currentRpm : get().fanData?.currentRpm;
+          get().appendSessionHistoryPoint(data, Number(fanRpm || 0));
+        }
         scheduleTelemetryFlush();
+      })
+    );
+
+    unsubscribers.push(
+      apiService.onTemperatureHistoryUpdate((point) => {
+        if (historyLoadBuffer !== null) historyLoadBuffer.push(point);
+        if (document.hidden) {
+          hiddenHistoryPoints.push(point);
+          return;
+        }
+        applyHistoryPoint(point);
       })
     );
 

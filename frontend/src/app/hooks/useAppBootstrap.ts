@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { startCoreLanguageSync } from '../lib/core-language-sync';
 import { apiService } from '../services/api';
 import { useAppStore } from '../store/app-store';
 
@@ -16,6 +17,8 @@ export function useAppBootstrap() {
   useEffect(() => {
     initializeApp();
   }, [initializeApp]);
+
+  useEffect(() => startCoreLanguageSync(), []);
 
   // 上报 GUI 存活时间戳。该值只用于核心的调试信息面板，因此不需要高频：
   // 连接探活已由 GUI 侧的 IPC 看护协程 + 核心侧心跳负责，不再依赖这个请求。

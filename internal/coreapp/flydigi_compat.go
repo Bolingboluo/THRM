@@ -3,6 +3,7 @@ package coreapp
 import (
 	"github.com/TIANLI0/THRM/internal/flydigicompat"
 	"github.com/TIANLI0/THRM/internal/ipc"
+	"github.com/TIANLI0/THRM/internal/types"
 )
 
 // 飞智空间站兼容处理。
@@ -70,8 +71,10 @@ func (a *CoreApp) SetFlydigiCompat(enabled bool) (flydigicompat.Status, error) {
 //
 // 由启动流程和 30 秒健康检查循环调用，是幂等的：没有需要改动的节点时不写注册表。
 func (a *CoreApp) ensureFlydigiCompat(reason string) {
-	cfg := a.configManager.Get()
-	if !cfg.FlydigiCompat {
+	// 只读一个开关：用 View 免去每 30 秒深拷贝整份配置。
+	enabled := false
+	a.configManager.View(func(cfg *types.AppConfig) { enabled = cfg.FlydigiCompat })
+	if !enabled {
 		return
 	}
 

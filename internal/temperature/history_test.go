@@ -21,6 +21,15 @@ type historyErrorLogger struct {
 
 func (l *historyErrorLogger) Error(string, ...any) { l.errors++ }
 
+// newTestHistoryRecorder 创建落盘到 filePath 的记录器，并在测试结束时同步 Flush：
+// 后台写盘协程若在 TempDir 清理时仍持有文件，Windows 上删除目录会失败。
+func newTestHistoryRecorder(t *testing.T, filePath string, capacity int, interval time.Duration) *HistoryRecorder {
+	t.Helper()
+	recorder := NewHistoryRecorder(filePath, capacity, interval, nil)
+	t.Cleanup(func() { _ = recorder.Flush() })
+	return recorder
+}
+
 func enableRecorderForTest(t *testing.T, recorder *HistoryRecorder) {
 	t.Helper()
 	if err := recorder.SetEnabled(true); err != nil {
@@ -31,7 +40,7 @@ func enableRecorderForTest(t *testing.T, recorder *HistoryRecorder) {
 func TestHistoryRecorderDefaultsEnabled(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second)
 	if !recorder.IsEnabled() {
 		t.Fatal("expected history recorder to default enabled")
 	}
@@ -61,7 +70,7 @@ func TestHistoryRecorderAddNormalizesSecondTimestamp(t *testing.T) {
 	t.Parallel()
 
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	baseSeconds := int64(1_717_000_000)
@@ -98,7 +107,7 @@ func TestHistoryRecorderPersistsBinarySnapshot(t *testing.T) {
 	t.Parallel()
 
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 	_, _ = recorder.Add(types.TemperatureData{CPUTemp: 60, GPUTemp: 54, UpdateTime: 1_717_000_000}, &types.FanData{CurrentRPM: 1500})
 	_, _ = recorder.Add(types.TemperatureData{CPUTemp: 62, GPUTemp: 55, CPUPower: 47.4, GPUPower: 102.6, UpdateTime: 1_717_000_005}, &types.FanData{CurrentRPM: 1550})
@@ -129,7 +138,7 @@ func TestHistoryRecorderPersistsBinarySnapshot(t *testing.T) {
 
 func TestHistoryRecorderLoadsLegacyV1WithoutPower(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 8, 5*time.Second)
 
 	data := make([]byte, 0, 48)
 	data = append(data, historyBinaryMagic...)
@@ -164,7 +173,7 @@ func TestHistoryRecorderPersistsTimelineEvents(t *testing.T) {
 	t.Parallel()
 
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	if _, ok := recorder.AddEvent(types.TimelineEventTypeDisconnect, types.TimelineKeyDeviceDisconnected); !ok {
@@ -197,7 +206,7 @@ func TestHistoryRecorderPersistsTimelineEvents(t *testing.T) {
 func TestHistoryRecorderDedupesRepeatedEvent(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	if _, ok := recorder.AddEvent(types.TimelineEventTypeResume, types.TimelineKeyResumeFromSleep); !ok {
@@ -220,7 +229,7 @@ func TestHistoryRecorderDedupesRepeatedEvent(t *testing.T) {
 func TestHistoryRecorderEventsWhenDisabled(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second)
 	if err := recorder.SetEnabled(false); err != nil {
 		t.Fatalf("disable recorder: %v", err)
 	}
@@ -237,7 +246,7 @@ func TestHistoryRecorderEventsWhenDisabled(t *testing.T) {
 func TestHistoryRecorderPrunesEventsOutsideRetention(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 4, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 4, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	now := time.Now().UnixMilli()
@@ -270,7 +279,7 @@ func TestHistoryRecorderRejectsCorruptedPointCount(t *testing.T) {
 		return binary.LittleEndian.AppendUint64(data, uint64(1_717_000_000_000))
 	}
 
-	if err := recorder.loadBinaryData(header(historyBinaryVersion, 0xFFFFFFFF)); err == nil {
+	if err := recorder.loadBinaryData(header(historyBinaryVersionEvents, 0xFFFFFFFF)); err == nil {
 		t.Fatal("expected a corrupted point count to be rejected")
 	}
 	// v1 每点 20 字节：声明 2 个点却只有 1 个点的数据。
@@ -286,7 +295,7 @@ func TestHistoryRecorderRejectsCorruptedPointCount(t *testing.T) {
 func TestHistoryRecorderRecoversFromClockRollback(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	now := time.Now().UnixMilli()
@@ -328,7 +337,7 @@ func TestHistoryRecorderRecoversFromClockRollback(t *testing.T) {
 func TestHistoryRecorderStaleSampleDoesNotDiscardHistory(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewHistoryRecorder(filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filepath.Join(t.TempDir(), "history.bin"), 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
 
 	now := time.Now().UnixMilli()
@@ -343,32 +352,26 @@ func TestHistoryRecorderStaleSampleDoesNotDiscardHistory(t *testing.T) {
 	}
 }
 
-// 序列化在 mutex 下、写盘在 flushMutex 下，更早序列化的快照可能后写到盘上。
-// 典型场景：一次在途的 Add 带着启用态的旧快照，落在 SetEnabled(false) 清空之后。
-func TestHistoryRecorderDropsStalePayload(t *testing.T) {
+// 关闭记录会清空历史：之前排队的追加记录与在途的后台写盘都不能把旧数据写回去。
+func TestHistoryRecorderDisableDropsQueuedRecords(t *testing.T) {
 	t.Parallel()
 
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 8, 5*time.Second)
 	enableRecorderForTest(t, recorder)
-	_, _ = recorder.Add(types.TemperatureData{CPUTemp: 60, UpdateTime: 1_717_000_000}, nil)
-
-	recorder.mutex.Lock()
-	stale, err := recorder.serializeLocked()
-	recorder.mutex.Unlock()
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
+	for i := range 5 {
+		_, _ = recorder.Add(types.TemperatureData{CPUTemp: 60 + i, UpdateTime: 1_717_000_000 + int64(i*5)}, nil)
 	}
 	if err := recorder.SetEnabled(false); err != nil {
 		t.Fatalf("disable recorder: %v", err)
 	}
-	if err := recorder.writeFile(stale); err != nil {
-		t.Fatalf("write stale payload: %v", err)
+	if err := recorder.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	reloaded := NewHistoryRecorder(filePath, 8, 5*time.Second, nil)
 	if reloaded.IsEnabled() || len(reloaded.Snapshot().Points) != 0 {
-		t.Fatal("an older snapshot overwrote the newer disabled state on disk")
+		t.Fatal("queued records resurrected history after it was disabled")
 	}
 }
 
@@ -377,7 +380,7 @@ func TestHistoryRecorderFlushConcurrentWithAdd(t *testing.T) {
 	t.Parallel()
 
 	filePath := filepath.Join(t.TempDir(), "history.bin")
-	recorder := NewHistoryRecorder(filePath, 64, time.Second, nil)
+	recorder := newTestHistoryRecorder(t, filePath, 64, time.Second)
 	enableRecorderForTest(t, recorder)
 
 	var clock atomic.Int64

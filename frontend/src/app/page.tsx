@@ -4,43 +4,55 @@ import { useCallback, useMemo, type ComponentProps } from 'react';
 import dynamic from 'next/dynamic';
 import { types } from '../../wailsjs/go/models';
 import { useShallow } from 'zustand/react/shallow';
+import type { ControlPanelTemperature } from './components/ControlPanel';
 import AppFatalError from './components/AppFatalError';
 import AppLoadingSkeleton from './components/AppLoadingSkeleton';
 import AppShell from './components/AppShell';
+// 首页（默认标签页）随主包一起加载：用 next/dynamic 的话它不在 index.html 里，
+// 冷启动时要等骨架屏结束后再多拉一次 chunk，界面会先空一下。
+import DeviceStatus from './components/DeviceStatus';
 import { useAppBootstrap } from './hooks/useAppBootstrap';
+import { useCoreEventSubscription } from './hooks/useCoreEventSubscription';
 import { useAppStore } from './store/app-store';
-import { i18n } from './lib/i18n';
+import { i18n, useLocale } from './lib/i18n';
 
-const DeviceStatus = dynamic(() => import('./components/DeviceStatus'), { ssr: false });
 const FanCurve = dynamic(() => import('./components/FanCurve'), { ssr: false });
 const ControlPanel = dynamic(() => import('./components/ControlPanel'), { ssr: false });
 const AboutPanel = dynamic(() => import('./components/AboutPanel'), { ssr: false });
 
 // 遥测（fanData 每秒最多 4 次、temperature 约 2 秒一次）只在用得到的标签页里订阅，
 // 不放进 Home 的 selector：否则每次推送都会让 Home → AppShell → 整个标签页一起重渲染。
+// 首页与曲线页在组件内部按需订阅各自显示的数值，整页只随这些数值之外的慢变化重渲染。
 
-// 首页就是实时仪表盘，随遥测重渲染是预期行为。
-function StatusTab(props: Omit<ComponentProps<typeof DeviceStatus>, 'fanData' | 'temperature'>) {
-  const { fanData, temperature } = useAppStore(
-    useShallow((state) => ({ fanData: state.fanData, temperature: state.temperature })),
-  );
-  return <DeviceStatus {...props} fanData={fanData} temperature={temperature} />;
-}
+const selectControlTemperature = (
+  state: ReturnType<typeof useAppStore.getState>,
+): ControlPanelTemperature | null => {
+  const temperature = state.temperature;
+  if (!temperature) return null;
+  return {
+    cpuTemp: temperature.cpuTemp,
+    gpuTemp: temperature.gpuTemp,
+    cpuModel: temperature.cpuModel,
+    gpuModel: temperature.gpuModel,
+    controlTemp: temperature.controlTemp,
+    controlSource: temperature.controlSource,
+    cpuSensors: temperature.cpuSensors,
+    gpuSensors: temperature.gpuSensors,
+    gpuDevices: temperature.gpuDevices,
+    selectedGpuDevice: temperature.selectedGpuDevice,
+  };
+};
 
-// FanCurve 不读 fanData，固定传 null，让它的 memo 挡住转速推送，只随温度刷新。
-function CurveTab(props: Omit<ComponentProps<typeof FanCurve>, 'fanData' | 'temperature'>) {
-  const temperature = useAppStore((state) => state.temperature);
-  return <FanCurve {...props} fanData={null} temperature={temperature} />;
-}
-
-// 设置页的转速概览由 ControlPanel 内部自行订阅，这里只需要温度（传感器列表等）。
+// 设置页的转速概览由 ControlPanel 内部自行订阅，这里只挑出它读到的温度字段做浅比较：
+// 每次推送都是新对象，但这些字段（传感器清单由 store 复用旧引用）常常一个都没变。
 function ControlTab(props: Omit<ComponentProps<typeof ControlPanel>, 'temperature'>) {
-  const temperature = useAppStore((state) => state.temperature);
+  const temperature = useAppStore(useShallow(selectControlTemperature));
   return <ControlPanel {...props} temperature={temperature} />;
 }
 
 export default function Home() {
   useAppBootstrap();
+  useCoreEventSubscription();
 
   const view = useAppStore(
     useShallow((state) => ({
@@ -77,7 +89,10 @@ export default function Home() {
     [view.config],
   );
 
-  if (view.isLoading) {
+  // 非默认语言的词条是按需加载的：加载完之前继续显示骨架屏，避免先闪一下中文。
+  const { localeReady } = useLocale();
+
+  if (view.isLoading || !localeReady) {
     return <AppLoadingSkeleton />;
   }
 
@@ -98,7 +113,7 @@ export default function Home() {
       bridgeWarning={view.bridgeWarning}
       onDismissBridgeWarning={clearBridgeWarning}
       statusContent={
-        <StatusTab
+        <DeviceStatus
           isConnected={view.isConnected}
           deviceProductId={view.deviceProductId}
           deviceModel={view.deviceModel}
@@ -113,7 +128,7 @@ export default function Home() {
         />
       }
       curveContent={
-        <CurveTab
+        <FanCurve
           config={safeConfig}
           onConfigChange={setConfig}
           isConnected={view.isConnected}

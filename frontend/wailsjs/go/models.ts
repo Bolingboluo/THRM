@@ -752,6 +752,7 @@ export namespace types {
 	    windowsAutoStart: boolean;
 	    disableSystemTray: boolean;
 	    themeMode: string;
+	    uiLanguage: string;
 	    smartStartStop: string;
 	    brightness: number;
 	    tempUpdateRate: number;
@@ -802,6 +803,7 @@ export namespace types {
 	        this.windowsAutoStart = source["windowsAutoStart"];
 	        this.disableSystemTray = source["disableSystemTray"];
 	        this.themeMode = source["themeMode"];
+	        this.uiLanguage = source["uiLanguage"];
 	        this.smartStartStop = source["smartStartStop"];
 	        this.brightness = source["brightness"];
 	        this.tempUpdateRate = source["tempUpdateRate"];
@@ -940,6 +942,7 @@ export namespace types {
 	    success: boolean;
 	    error: string;
 	    cpuTempError: string;
+	    compact?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new BridgeTemperatureData(source);
@@ -967,6 +970,7 @@ export namespace types {
 	        this.success = source["success"];
 	        this.error = source["error"];
 	        this.cpuTempError = source["cpuTempError"];
+	        this.compact = source["compact"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,8 @@ const (
 	ReqSetExtendedSensors       RequestType = "SetExtendedSensors"
 	ReqExportCoolingBenefitText RequestType = "ExportCoolingBenefitText"
 	ReqPreviewRTSSPosition      RequestType = "PreviewRTSSPosition"
+	// ReqSetUILanguage 上报 GUI 当前界面语言（SetStringParams），核心据此本地化托盘与通知。
+	ReqSetUILanguage RequestType = "SetUILanguage"
 
 	// 飞智空间站兼容
 	ReqGetFlydigiCompatStatus RequestType = "GetFlydigiCompatStatus"
@@ -194,6 +197,9 @@ type Server struct {
 	running       bool
 	throttleMutex sync.Mutex
 	lastEventEmit map[string]time.Time
+	// activeCh 在出现新的前台客户端（新连接或重新订阅）时收到一次信号，
+	// 让后台低频采样立即恢复，而不是等完一个空闲采样周期。
+	activeCh chan struct{}
 }
 
 type clientState struct {
@@ -206,6 +212,21 @@ type clientState struct {
 	sem       chan struct{}
 	closeOnce sync.Once
 	closed    chan struct{}
+	// subscribed 表示该客户端当前需要高频遥测（风扇、温度、温度历史）。连上即为
+	// true，兼容从不发订阅请求的旧客户端；GUI 窗口隐藏时退订，核心据此回到后台模式。
+	subscribed atomic.Bool
+	// features 是客户端在 SubscribeEvents 里声明的协议能力位，见 clientFeatureBits。
+	features atomic.Uint32
+}
+
+// clientFeatureBits 把订阅请求里的能力名映射为位。未知能力直接忽略，新旧版本互不影响。
+var clientFeatureBits = map[string]uint32{
+	FeatureTemperatureSensorValues: 1 << 0,
+}
+
+// SubscribeEventsParams 是 SubscribeEvents 请求的参数，可省略。
+type SubscribeEventsParams struct {
+	Features []string `json:"features,omitempty"`
 }
 
 const clientWriteQueueSize = 64
@@ -255,6 +276,7 @@ func NewServer(handler RequestHandler, logger types.Logger) *Server {
 		handler:       handler,
 		logger:        logger,
 		lastEventEmit: make(map[string]time.Time),
+		activeCh:      make(chan struct{}, 1),
 	}
 }
 
@@ -308,10 +330,12 @@ func (s *Server) acceptConnections() {
 			sem:     make(chan struct{}, maxConcurrentRequestsPerClient),
 			closed:  make(chan struct{}),
 		}
+		state.subscribed.Store(true)
 
 		s.mutex.Lock()
 		s.clients[conn] = state
 		s.mutex.Unlock()
+		s.signalActiveClient()
 
 		s.logInfo("新的 IPC 客户端已连接")
 
@@ -469,7 +493,10 @@ func readFrame(reader *bufio.Reader, limit int) ([]byte, error) {
 func (s *Server) serveRequest(state *clientState, req Request) {
 	s.logDebug("IPC 请求[%s]: %s", req.RequestID, req.Type)
 
-	resp := s.invokeHandler(req)
+	resp, handled := s.handleSubscription(state, req)
+	if !handled {
+		resp = s.invokeHandler(req)
+	}
 	if resp.ProtocolVersion == "" {
 		resp.ProtocolVersion = appmeta.ProtocolVersion
 	}
@@ -493,6 +520,43 @@ func (s *Server) serveRequest(state *clientState, req Request) {
 	case state.respCh <- append(respBytes, '\n'):
 	case <-state.closed:
 		s.logDebug("客户端已断开，丢弃响应: requestID=%s", resp.RequestID)
+	}
+}
+
+// handleSubscription 处理订阅类请求。订阅状态属于连接本身，由服务端直接维护，
+// 不经过业务 handler。
+func (s *Server) handleSubscription(state *clientState, req Request) (Response, bool) {
+	switch req.Type {
+	case ReqSubscribeEvents:
+		var params SubscribeEventsParams
+		if len(req.Data) > 0 {
+			if err := json.Unmarshal(req.Data, &params); err != nil {
+				return Response{Success: false, Error: fmt.Sprintf("解析订阅参数失败: %v", err)}, true
+			}
+		}
+		var features uint32
+		for _, name := range params.Features {
+			features |= clientFeatureBits[name]
+		}
+		state.features.Store(features)
+		if !state.subscribed.Swap(true) {
+			s.logDebug("IPC 客户端恢复订阅高频事件")
+			s.signalActiveClient()
+		}
+		return Response{Success: true}, true
+	case ReqUnsubscribeEvents:
+		if state.subscribed.Swap(false) {
+			s.logDebug("IPC 客户端暂停订阅高频事件")
+		}
+		return Response{Success: true}, true
+	}
+	return Response{}, false
+}
+
+func (s *Server) signalActiveClient() {
+	select {
+	case s.activeCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -540,9 +604,18 @@ func (s *Server) shouldDropEvent(eventType string) bool {
 	return false
 }
 
-// BroadcastEvent 广播事件给所有客户端
+// BroadcastEvent 广播事件给客户端。
+//
+// 高频遥测（风扇、温度、温度历史）只发给仍在订阅的客户端：窗口隐藏的 GUI 不需要，
+// 恢复显示时会重新订阅并主动拉取一次完整状态。其余事件（配置、设备连接状态、错误、
+// 心跳等）照常发给全部客户端，保证 GUI 恢复显示时状态是对的，心跳也继续承担探活。
 func (s *Server) BroadcastEvent(eventType string, data any) {
-	if !s.HasClients() {
+	highFrequency := isHighFrequencyEvent(eventType)
+	if highFrequency {
+		if !s.HasActiveClients() {
+			return
+		}
+	} else if !s.HasClients() {
 		return
 	}
 
@@ -556,32 +629,20 @@ func (s *Server) BroadcastEvent(eventType string, data any) {
 		return
 	}
 
-	event := Event{
-		SchemaVersion: appmeta.ProtocolVersion,
-		EventID:       newMessageID("evt"),
-		Timestamp:     time.Now().UnixMilli(),
-		Source:        "core",
-		IsEvent:       true,
-		Type:          eventType,
-		Data:          dataBytes,
-	}
-
-	eventBytes, err := json.Marshal(event)
-	if err != nil {
-		s.logError("序列化事件失败: %v", err)
-		return
-	}
-	payload := append(eventBytes, '\n')
+	payload := appendEventFrame(make([]byte, 0, len(dataBytes)+160), newMessageID("evt"), time.Now().UnixMilli(), eventType, dataBytes)
 
 	s.mutex.RLock()
 	clients := make([]*clientState, 0, len(s.clients))
 	for _, state := range s.clients {
+		if highFrequency && !state.subscribed.Load() {
+			continue
+		}
 		clients = append(clients, state)
 	}
 	s.mutex.RUnlock()
 
 	for _, state := range clients {
-		if isHighFrequencyEvent(eventType) {
+		if highFrequency {
 			select {
 			case state.writeCh <- payload:
 			case <-state.closed:
@@ -601,6 +662,52 @@ func (s *Server) BroadcastEvent(eventType string, data any) {
 			s.logDebug("客户端写队列持续拥塞，丢弃关键事件: %s", eventType)
 		}
 	}
+}
+
+// appendEventFrame 拼出一帧事件（含结尾换行），字节上与 json.Marshal(Event{...}) 完全一致。
+//
+// data 必须是 json.Marshal 的输出：它已经是紧凑且做过 HTML 转义的 JSON，
+// 而 json.Marshal 处理 RawMessage 字段时正是原样紧凑拷贝，所以直接拼接结果相同，
+// 省掉了对整段载荷的第二次扫描与拷贝。
+func appendEventFrame(dst []byte, eventID string, timestamp int64, eventType string, data []byte) []byte {
+	dst = append(dst, '{')
+	if appmeta.ProtocolVersion != "" {
+		dst = append(dst, `"schemaVersion":`...)
+		dst = appendJSONString(dst, appmeta.ProtocolVersion)
+		dst = append(dst, ',')
+	}
+	if eventID != "" {
+		dst = append(dst, `"eventId":`...)
+		dst = appendJSONString(dst, eventID)
+		dst = append(dst, ',')
+	}
+	if timestamp != 0 {
+		dst = append(dst, `"timestamp":`...)
+		dst = strconv.AppendInt(dst, timestamp, 10)
+		dst = append(dst, ',')
+	}
+	dst = append(dst, `"source":"core","isEvent":true,"type":`...)
+	dst = appendJSONString(dst, eventType)
+	if len(data) > 0 {
+		dst = append(dst, `,"data":`...)
+		dst = append(dst, data...)
+	}
+	return append(dst, '}', '\n')
+}
+
+// appendJSONString 追加一个 JSON 字符串。事件类型、ID 都是纯 ASCII 标识符，走快路径；
+// 含需要转义的字符时交给 encoding/json，保证与 json.Marshal 的转义规则一致。
+func appendJSONString(dst []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c >= 0x80 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+			encoded, _ := json.Marshal(s)
+			return append(dst, encoded...)
+		}
+	}
+	dst = append(dst, '"')
+	dst = append(dst, s...)
+	return append(dst, '"')
 }
 
 // Stop 停止服务器
@@ -631,6 +738,47 @@ func (s *Server) HasClients() bool {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return len(s.clients) > 0
+}
+
+// HasActiveClients 检查是否有仍在订阅高频遥测的客户端（窗口可见或正在跑测试的 GUI）。
+// 只连着但已退订的 GUI（窗口隐藏）不算，核心据此回到后台低频模式。
+func (s *Server) HasActiveClients() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	for _, state := range s.clients {
+		if state.subscribed.Load() {
+			return true
+		}
+	}
+	return false
+}
+
+// ActiveClientsSupport 判断是否所有订阅中的客户端都声明了 feature（且至少有一个）。
+// 高频事件对所有订阅者共用同一份编码，只要有一个旧客户端就得按旧格式发送。
+func (s *Server) ActiveClientsSupport(feature string) bool {
+	bit, known := clientFeatureBits[feature]
+	if !known {
+		return false
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	active := false
+	for _, state := range s.clients {
+		if !state.subscribed.Load() {
+			continue
+		}
+		if state.features.Load()&bit == 0 {
+			return false
+		}
+		active = true
+	}
+	return active
+}
+
+// ActiveClientsChanged 在出现新的订阅客户端（新连接或重新订阅）时收到信号。
+// 信号可能合并，收到后应以 HasActiveClients 的当前值为准。
+func (s *Server) ActiveClientsChanged() <-chan struct{} {
+	return s.activeCh
 }
 
 // 日志辅助方法
@@ -762,36 +910,30 @@ func (c *Client) readLoop(conn net.Conn, reader *bufio.Reader) {
 			return
 		}
 
-		// 使用通用结构来检测消息类型
-		var msg struct {
-			IsResponse bool `json:"isResponse"`
-			IsEvent    bool `json:"isEvent"`
-		}
+		// 响应与事件的字段并集，一行只解码一次（此前先探测类型再整行重解一遍）。
+		var msg inboundMessage
 		if err := json.Unmarshal(line, &msg); err != nil {
-			c.logDebug("解析消息类型失败: %v", err)
+			c.logDebug("解析消息失败: %v", err)
 			continue
 		}
 
 		if msg.IsResponse {
-			var resp Response
-			if err := json.Unmarshal(line, &resp); err == nil {
-				// 按 RequestID 路由到对应等待者；找不到则说明请求已超时取消，直接丢弃
-				c.pendingMutex.Lock()
-				call, ok := c.pending[resp.RequestID]
-				if ok {
-					delete(c.pending, resp.RequestID)
-				}
-				c.pendingMutex.Unlock()
-				if ok {
-					// channel 容量 1 + delete 后立即送达，不会阻塞
-					call.ch <- &resp
-				} else {
-					c.logDebug("收到无主响应，丢弃: requestID=%s", resp.RequestID)
-				}
+			resp := msg.response()
+			// 按 RequestID 路由到对应等待者；找不到则说明请求已超时取消，直接丢弃
+			c.pendingMutex.Lock()
+			call, ok := c.pending[resp.RequestID]
+			if ok {
+				delete(c.pending, resp.RequestID)
+			}
+			c.pendingMutex.Unlock()
+			if ok {
+				// channel 容量 1 + delete 后立即送达，不会阻塞
+				call.ch <- &resp
+			} else {
+				c.logDebug("收到无主响应，丢弃: requestID=%s", resp.RequestID)
 			}
 		} else if msg.IsEvent {
-			var event Event
-			if err := json.Unmarshal(line, &event); err == nil && event.Type != "" {
+			if event := msg.event(); event.Type != "" {
 				if isHighFrequencyEvent(event.Type) {
 					select {
 					case events <- event:
@@ -810,6 +952,49 @@ func (c *Client) readLoop(conn net.Conn, reader *bufio.Reader) {
 				}
 			}
 		}
+	}
+}
+
+// inboundMessage 是 Response 与 Event 的字段并集。两者共用 timestamp 与 data，
+// 其余字段互不重叠，因此解码一次即可还原出任意一种。
+type inboundMessage struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	RequestID       string          `json:"requestId"`
+	IsResponse      bool            `json:"isResponse"`
+	Success         bool            `json:"success"`
+	ErrorCode       string          `json:"errorCode"`
+	Error           string          `json:"error"`
+	SchemaVersion   string          `json:"schemaVersion"`
+	EventID         string          `json:"eventId"`
+	Source          string          `json:"source"`
+	IsEvent         bool            `json:"isEvent"`
+	Type            string          `json:"type"`
+	Timestamp       int64           `json:"timestamp"`
+	Data            json.RawMessage `json:"data"`
+}
+
+func (m *inboundMessage) response() Response {
+	return Response{
+		ProtocolVersion: m.ProtocolVersion,
+		RequestID:       m.RequestID,
+		Timestamp:       m.Timestamp,
+		IsResponse:      m.IsResponse,
+		Success:         m.Success,
+		ErrorCode:       m.ErrorCode,
+		Error:           m.Error,
+		Data:            m.Data,
+	}
+}
+
+func (m *inboundMessage) event() Event {
+	return Event{
+		SchemaVersion: m.SchemaVersion,
+		EventID:       m.EventID,
+		Timestamp:     m.Timestamp,
+		Source:        m.Source,
+		IsEvent:       m.IsEvent,
+		Type:          m.Type,
+		Data:          m.Data,
 	}
 }
 

@@ -30,6 +30,9 @@ type App struct {
 	coreStatusMutex sync.Mutex
 	coreServiceOK   bool
 
+	// coreEvents 记录前端是否需要高频遥测（窗口隐藏时暂停），见 core_events.go。
+	coreEvents coreEventSubscription
+
 	// 缓存的状态
 	isConnected bool
 	currentTemp types.TemperatureData

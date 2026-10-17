@@ -169,23 +169,35 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 	}
 
 	switch event.Type {
+	// 三类高频遥测在窗口隐藏（已退订）时不再转给 webview；恢复显示时 GUI 会主动补一份
+	// 完整状态。核心侧也已按订阅过滤，这里兜住旧版核心以及退订生效前的那几帧。
+	// 风扇数据与历史点是核心用同一份结构体 json.Marshal 出来的，原样转发与"解码成结构体
+	// 再由 Wails 编码"得到的 JSON 完全相同，省掉一次解码与编码。
 	case ipc.EventFanDataUpdate:
-		var fanData types.FanData
-		if err := json.Unmarshal(event.Data, &fanData); err == nil {
-			runtime.EventsEmit(a.ctx, "fan-data-update", fanData)
+		if a.coreEventsPaused() || len(event.Data) == 0 {
+			return
 		}
+		runtime.EventsEmit(a.ctx, "fan-data-update", event.Data)
 
 	case ipc.EventTemperatureUpdate:
-		var temp types.TemperatureData
+		var temp ipc.TemperatureEvent
 		if err := json.Unmarshal(event.Data, &temp); err == nil {
-			runtime.EventsEmit(a.ctx, "temperature-update", a.mergeCurrentTemp(temp))
+			// 隐藏期间照样并入缓存，传感器清单的变化不会因此漏掉。
+			merged, ok := a.mergeTemperatureEvent(temp)
+			if a.coreEventsPaused() {
+				return
+			}
+			if !ok {
+				a.resyncTemperatureCatalog()
+			}
+			runtime.EventsEmit(a.ctx, "temperature-update", merged)
 		}
 
 	case ipc.EventTemperatureHistoryUpdate:
-		var point types.TemperatureHistoryPoint
-		if err := json.Unmarshal(event.Data, &point); err == nil {
-			runtime.EventsEmit(a.ctx, "temperature-history-update", point)
+		if a.coreEventsPaused() || len(event.Data) == 0 {
+			return
 		}
+		runtime.EventsEmit(a.ctx, "temperature-history-update", event.Data)
 
 	case ipc.EventTimelineEvent:
 		var timelineEvent types.TimelineEvent
@@ -238,15 +250,9 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 			runtime.EventsEmit(a.ctx, "legion-power-mode-update", payload)
 		}
 
-	case ipc.EventHealthPing:
-		var timestamp int64
-		json.Unmarshal(event.Data, &timestamp)
-		runtime.EventsEmit(a.ctx, "health-ping", timestamp)
-
-	case ipc.EventHeartbeat:
-		var timestamp int64
-		json.Unmarshal(event.Data, &timestamp)
-		runtime.EventsEmit(a.ctx, "heartbeat", timestamp)
+	case ipc.EventHealthPing, ipc.EventHeartbeat:
+		// 心跳只用于核心侧探活（写超时即摘除假死的客户端），前端没有任何监听者，
+		// 不再每 30 秒往 webview 推一次。必须保留这个分支，否则会落进 default 被原样转发。
 
 	case "show-window":
 		a.ShowWindow()
@@ -292,6 +298,7 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 			return nil, wrapped
 		}
 		a.ipcClient.SetEventHandler(a.handleCoreEvent)
+		go a.syncCoreEventSubscription()
 		a.emitCoreServiceOK()
 	}
 
@@ -333,6 +340,7 @@ func (a *App) sendRequest(reqType ipc.RequestType, data any) (*ipc.Response, err
 		return nil, wrapped
 	}
 	a.ipcClient.SetEventHandler(a.handleCoreEvent)
+	go a.syncCoreEventSubscription()
 	a.resetIPCTimeouts()
 	if !retryable {
 		wrapped := fmt.Errorf("request %s may have been applied before IPC disconnected; state was not replayed automatically: %v", reqType, err)

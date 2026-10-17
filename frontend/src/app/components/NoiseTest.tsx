@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import clsx from 'clsx';
 import { types } from '../../../wailsjs/go/models';
 import { apiService } from '../services/api';
+import { holdCoreTelemetry } from '../hooks/useCoreEventSubscription';
 import {
   analyzeNoiseSamples,
   buildSweepSteps,
@@ -188,6 +189,8 @@ const NoiseTest = function NoiseTest({ open, onOpenChange, config, onConfigChang
     const snapshot = captureFanState(config);
     const controller = new AbortController();
     abortRef.current = controller;
+    // 扫频靠核心的实时转速判断稳定，窗口被隐藏也不能让核心退回后台低频模式。
+    const releaseTelemetry = holdCoreTelemetry();
     setSamples([]);
     setAnalysis(null);
     setProfileApplied(false);
@@ -223,6 +226,7 @@ const NoiseTest = function NoiseTest({ open, onOpenChange, config, onConfigChang
         toast.error(t('fanCurve.noiseTest.toast.restoreFailed'), { description: getErrorMessage(err) });
       } finally {
         setRestoring(false);
+        releaseTelemetry();
       }
     }
   }, [config, isConnected, t]);

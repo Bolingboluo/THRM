@@ -96,6 +96,11 @@ func (m *Manager) sendHIDCommandAndWaitLocked(command byte, payload []byte, repo
 	if m.responses == nil {
 		m.responses = newResponseBroker()
 	}
+	// 单条命令的 ACK 同样只能靠读循环取回。不在这里标记事务的话，ACK 要等读循环
+	// 下一次自然醒来（空闲轮询下最长 500ms）才被读到，期间一直占着设备写锁；
+	// 标记后读循环立刻醒来并改用毫秒级轮询，ACK 到达即被派发。事务计数可嵌套，
+	// 外层已开启事务时这里只是多计一次。
+	defer m.beginTransaction()()
 	waiter := m.responses.register(command)
 	if err := m.writeHIDFrameLocked(command, payload, reportLen); err != nil {
 		m.responses.cancel(waiter)

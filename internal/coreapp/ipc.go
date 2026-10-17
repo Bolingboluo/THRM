@@ -89,6 +89,17 @@ func (a *CoreApp) handleIPCRequest(req ipc.Request) ipc.Response {
 		a.PreviewRTSSPosition(params.Mode, params.X, params.Y)
 		return a.successResponse(true)
 
+	case ipc.ReqSetUILanguage:
+		var params ipc.SetStringParams
+		if err := json.Unmarshal(req.Data, &params); err != nil {
+			return a.errorResponse("解析界面语言失败: " + err.Error())
+		}
+		lang, err := a.SetUILanguage(params.Value)
+		if err != nil {
+			return a.errorResponse(err.Error())
+		}
+		return a.dataResponse(lang)
+
 	case ipc.ReqSetFanCurve:
 		var curve []types.FanCurvePoint
 		if err := json.Unmarshal(req.Data, &curve); err != nil {

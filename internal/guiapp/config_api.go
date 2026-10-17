@@ -41,6 +41,23 @@ func (a *App) UpdateConfig(cfg AppConfig) error {
 	return nil
 }
 
+// SetUILanguage 把界面语言告诉核心，让托盘、系统通知与快捷键提示使用同一种语言。
+// 返回核心实际生效的语言。核心在语言未变时不写配置，重复上报是无害的。
+func (a *App) SetUILanguage(lang string) (string, error) {
+	resp, err := a.sendRequest(ipc.ReqSetUILanguage, ipc.SetStringParams{Value: lang})
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("%s", resp.Error)
+	}
+	var applied string
+	if err := json.Unmarshal(resp.Data, &applied); err != nil {
+		return "", err
+	}
+	return applied, nil
+}
+
 // PreviewRTSSPosition moves the live OSD without writing the application
 // configuration. The final position is persisted through UpdateConfig.
 func (a *App) PreviewRTSSPosition(mode string, x, y int) error {

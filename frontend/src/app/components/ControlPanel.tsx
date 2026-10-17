@@ -1,7 +1,8 @@
 'use client';
 
 import React, { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+// m + AppShell 里的 LazyMotion：动画特性异步加载，见 lib/motion-features.ts
+import { m as motion, AnimatePresence } from 'framer-motion';
 import {
   Play,
   Pause,
@@ -73,11 +74,20 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
+/**
+ * 设置页实际读到的温度字段。外层按这些字段做浅比较后再传进来：温度每次推送都是新对象，
+ * 只有这些字段（传感器清单由 store 复用旧引用）变了才需要重渲染这个三千多行的组件。
+ */
+export type ControlPanelTemperature = Pick<
+  types.TemperatureData,
+  'cpuTemp' | 'gpuTemp' | 'cpuModel' | 'gpuModel' | 'controlTemp' | 'controlSource' | 'cpuSensors' | 'gpuSensors' | 'gpuDevices' | 'selectedGpuDevice'
+>;
+
 interface ControlPanelProps {
   config: types.AppConfig;
   onConfigChange: (config: types.AppConfig) => void;
   isConnected: boolean;
-  temperature: types.TemperatureData | null;
+  temperature: ControlPanelTemperature | null;
   legionFnQSupported: boolean;
   deviceModel: string | null;
   deviceSettings: DeviceSettings | null;
@@ -670,7 +680,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   const [recordingTarget, setRecordingTarget] = useState<'manual' | 'auto' | 'curve' | null>(null);
   const [curveProfiles, setCurveProfiles] = useState<CurveProfile[]>([]);
   const [curveProfileLoading, setCurveProfileLoading] = useState(false);
-  const [temperatureHistoryEnabled, setTemperatureHistoryEnabled] = useState(false);
+  const [temperatureHistoryEnabled, setTemperatureHistoryEnabled] = useState(() => useAppStore.getState().historyEnabled);
   // 平台取自 Wails 运行时而不是 userAgent：WebKitGTK 的 UA 里没有可靠的平台标识。
   const [isWindowsPlatform, setIsWindowsPlatform] = useState(false);
   const [flydigiCompat, setFlydigiCompat] = useState<FlydigiCompatStatus | null>(null);
@@ -1525,6 +1535,8 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     try {
       await apiService.setTemperatureHistoryEnabled(enabled);
       setTemperatureHistoryEnabled(enabled);
+      // 首页与曲线页共用 store 里的历史，不再在挂载时重新拉取，这里改了开关要同步过去。
+      void useAppStore.getState().loadTemperatureHistory();
     } catch { /* noop */ } finally {
       setLoading('temperatureHistory', false);
     }
@@ -1575,26 +1587,16 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     }
   }, []);
 
+  // 开关状态取自 store 里共用的历史快照：原先为了读一个布尔值，每次进入设置页都把整份
+  // 历史（24 小时约 1.7 万点）下载一遍。读取失败时 store 同样视为关闭。
+  const storeTemperatureHistoryEnabled = useAppStore((state) => state.historyEnabled);
+  const ensureTemperatureHistoryLoaded = useAppStore((state) => state.ensureTemperatureHistoryLoaded);
   useEffect(() => {
-    let cancelled = false;
-    const loadTelemetryState = async () => {
-      try {
-        const payload = await apiService.getTemperatureHistory();
-        if (!cancelled) {
-          setTemperatureHistoryEnabled(payload?.enabled !== false);
-        }
-      } catch {
-        if (!cancelled) {
-          setTemperatureHistoryEnabled(false);
-        }
-      }
-    };
-
-    loadTelemetryState();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    ensureTemperatureHistoryLoaded();
+  }, [ensureTemperatureHistoryLoaded]);
+  useEffect(() => {
+    setTemperatureHistoryEnabled(storeTemperatureHistoryEnabled);
+  }, [storeTemperatureHistoryEnabled]);
 
   const handleCurveProfileChange = useCallback(async (profileId: string) => {
     if (!profileId || profileId === activeCurveProfileId) return;

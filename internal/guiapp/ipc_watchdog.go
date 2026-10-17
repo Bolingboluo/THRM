@@ -61,6 +61,7 @@ func (a *App) reconnectCore() {
 	}
 
 	a.ipcClient.SetEventHandler(a.handleCoreEvent)
+	go a.syncCoreEventSubscription()
 	guiLogger.Info("IPC 看护重连成功，请求前端重新同步核心状态")
 	a.emitCoreServiceOK()
 	a.emitCoreResynced()

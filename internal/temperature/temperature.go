@@ -49,6 +49,41 @@ type Reader struct {
 	warnMutex        sync.Mutex
 	lastBridgeWarn   string
 	lastBridgeWarnAt time.Time
+
+	// 最近一次完整读取的传感器清单，精简读取（selection.Compact）时用它回填结果，
+	// 见 Read。Read 会被控温循环与 IPC 测试读取并发调用，需加锁。
+	catalogMutex sync.Mutex
+	catalog      sensorCatalog
+}
+
+// sensorCatalog 是一次完整桥接读取得到的传感器清单。
+//
+// 精简读取只带回标量读数，但 a.currentTemp 仍会被 GetTemperature/GetDeviceStatus 原样
+// 交给刚打开的 GUI：清单若是空的，传感器下拉框会变空、首页会误判"没有 GPU 传感器"，
+// 直到下一次采样（后台空闲时最长 10 秒以上）。因此用上一次完整结果回填清单；
+// GUI 连上后的第一次采样就是完整读取，会立刻刷新这些读数。
+// 清单内容依赖 GPU 选择与 GPU 监测开关，三者变化时缓存失效，下一次先读完整结果。
+type sensorCatalog struct {
+	valid           bool
+	gpuDevice       string
+	gpuSensor       string
+	disableGpu      bool
+	cpuSensors      []types.TemperatureSensor
+	gpuSensors      []types.TemperatureSensor
+	cpuPowerSensors []types.PowerSensor
+	gpuPowerSensors []types.PowerSensor
+	gpuDevices      []types.TemperatureGPUDevice
+}
+
+func (c *sensorCatalog) matches(selection types.TemperatureSelection) bool {
+	return c.valid && c.gpuDevice == selection.GpuDevice && c.gpuSensor == selection.GpuSensor &&
+		c.disableGpu == selection.DisableGpu
+}
+
+// bridgeReadOutcome 记录一次 Read 中桥接返回的结果形态，供清单缓存使用。
+type bridgeReadOutcome struct {
+	compact     bool // 桥接返回的是精简结果
+	fullSuccess bool // 桥接返回了完整且有效的结果
 }
 
 // warnBridge 记录桥接告警：内容变化时立即记录，相同内容每 bridgeWarnInterval 最多一次。
@@ -77,17 +112,65 @@ func NewReader(bridgeManager *bridge.Manager, logger types.Logger) *Reader {
 	}
 }
 
-// Read 读取温度
+// Read 读取温度。
+//
+// selection.Compact 只是请求：还没有与当前选择匹配的完整清单可供回填时，本次照常
+// 读取完整结果。精简结果的标量读数与完整读取完全一致，传感器清单由缓存回填。
 func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureData {
 	selection = types.NormalizeTemperatureSelection(selection)
+	if selection.Compact {
+		r.catalogMutex.Lock()
+		selection.Compact = r.catalog.matches(selection)
+		r.catalogMutex.Unlock()
+	}
+	temp, outcome := r.read(selection)
+	r.reconcileSensorCatalog(&temp, outcome, selection)
+	return temp
+}
+
+// reconcileSensorCatalog 用完整结果刷新清单缓存，或用缓存回填精简结果的清单。
+// OtherSensors 不经缓存：精简结果里它照常是完整的（只在散热收益测试期间非空）。
+func (r *Reader) reconcileSensorCatalog(temp *types.TemperatureData, outcome bridgeReadOutcome, selection types.TemperatureSelection) {
+	r.catalogMutex.Lock()
+	defer r.catalogMutex.Unlock()
+	switch {
+	case outcome.compact:
+		if !r.catalog.matches(selection) {
+			// 期间有一次按不同选择的完整读取刷新了缓存（极少见）：清单宁可留空也不能张冠李戴。
+			temp.CpuSensors = nil
+			return
+		}
+		temp.CpuSensors = r.catalog.cpuSensors
+		temp.GpuSensors = r.catalog.gpuSensors
+		temp.CpuPowerSensors = r.catalog.cpuPowerSensors
+		temp.GpuPowerSensors = r.catalog.gpuPowerSensors
+		temp.GpuDevices = r.catalog.gpuDevices
+	case outcome.fullSuccess:
+		r.catalog = sensorCatalog{
+			valid:           true,
+			gpuDevice:       selection.GpuDevice,
+			gpuSensor:       selection.GpuSensor,
+			disableGpu:      selection.DisableGpu,
+			cpuSensors:      temp.CpuSensors,
+			gpuSensors:      temp.GpuSensors,
+			cpuPowerSensors: temp.CpuPowerSensors,
+			gpuPowerSensors: temp.GpuPowerSensors,
+			gpuDevices:      temp.GpuDevices,
+		}
+	}
+}
+
+func (r *Reader) read(selection types.TemperatureSelection) (types.TemperatureData, bridgeReadOutcome) {
 	temp := types.TemperatureData{
 		UpdateTime:    time.Now().UnixMilli(),
 		BridgeOk:      true,
 		ControlSource: selection.TempSource,
 	}
+	var outcome bridgeReadOutcome
 
 	if r.bridgeManager != nil && r.bridgeManager.IsSupported() {
 		bridgeTemp := r.bridgeManager.GetTemperature(selection)
+		outcome.compact = bridgeTemp.Compact
 		copyBridgeTemperatureMetadata(&temp, bridgeTemp, selection)
 		if selection.DisableGpu {
 			stripGpuReadings(&temp, selection.TempSource)
@@ -97,7 +180,7 @@ func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureDat
 		if !bridgeTemp.Success && bridge.IsStarting(bridgeTemp.Error) {
 			temp.BridgeOk = false
 			temp.BridgeMsg = bridgeTemp.Error
-			return temp
+			return temp, outcome
 		}
 		if bridgeTemp.Success {
 			if bridgeTemp.CpuTemp == 0 && (selection.DisableGpu || bridgeTemp.GpuTemp == 0) {
@@ -111,15 +194,17 @@ func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureDat
 				temp.GPUPower = fallback.gpuPower
 				temp.MaxTemp = max(temp.CPUTemp, temp.GPUTemp)
 				temp.ControlTemp = resolveControlTemp(temp.CPUTemp, temp.GPUTemp, selection.TempSource)
-				return temp
+				return temp, outcome
 			}
 
 			// 用户多选 CPU 传感器时，按所选传感器温度的算术平均覆盖 CPU 基准温度。
+			// 精简结果的 CpuSensors 恰好只含所选传感器，平均值与完整结果相同。
 			applyMultiSensorCpuAverage(&temp, selection.CpuSensors)
 
 			temp.BridgeOk = true
 			temp.BridgeMsg = ""
-			return temp
+			outcome.fullSuccess = !bridgeTemp.Compact
+			return temp, outcome
 		}
 
 		r.warnBridge("桥接程序读取温度失败: %s, 使用备用方法", bridgeTemp.Error)
@@ -143,7 +228,7 @@ func (r *Reader) Read(selection types.TemperatureSelection) types.TemperatureDat
 	temp.MaxTemp = max(temp.CPUTemp, temp.GPUTemp)
 	temp.ControlTemp = resolveControlTemp(temp.CPUTemp, temp.GPUTemp, selection.TempSource)
 
-	return temp
+	return temp, outcome
 }
 
 // stripGpuReadings 清空 GPU 相关读数与元数据。停用 GPU 监测时即便桥接程序

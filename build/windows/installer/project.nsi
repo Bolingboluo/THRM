@@ -842,6 +842,67 @@ Function un.CleanupLegacyShortcuts
     Delete "$SMSTARTUP\BS2PRO Core.lnk"
 FunctionEnd
 
+# --- Native image (NGen) pre-compilation for the temperature bridge -------------
+#
+# THRM TempBridge targets .NET Framework 4.7.2, so without a native image the CLR
+# JIT-compiles it (and LibreHardwareMonitorLib) on every start. "ngen install /queue"
+# hands the compilation to the .NET optimization service, which does it in the
+# background when the machine is idle, so the installer does not wait for it.
+#
+# Strictly best-effort: a missing ngen.exe, a non-zero exit code or a timeout is
+# ignored and can never abort installation or uninstallation. nsExec runs ngen
+# without a console window (also under /S from the in-app updater).
+!define THRM_BRIDGE_EXECUTABLE "THRM TempBridge.exe"
+
+!macro THRM_NGEN_FUNCTIONS UN
+# Pushes the path of ngen.exe, or "" when the .NET Framework 4 ngen is missing.
+# The bridge is built for x64, so the 64-bit Framework comes first.
+Function ${UN}FindNGen
+    ${If} ${FileExists} "$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe"
+        Push "$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe"
+    ${ElseIf} ${FileExists} "$WINDIR\Microsoft.NET\Framework\v4.0.30319\ngen.exe"
+        Push "$WINDIR\Microsoft.NET\Framework\v4.0.30319\ngen.exe"
+    ${Else}
+        Push ""
+    ${EndIf}
+FunctionEnd
+
+# Removes the native images of the installed bridge before its files are deleted.
+Function ${UN}NGenUninstallBridge
+    Push $0
+    Push $1
+    Call ${UN}FindNGen
+    Pop $0
+    ${If} $0 != ""
+    ${AndIf} ${FileExists} "$INSTDIR\bridge\${THRM_BRIDGE_EXECUTABLE}"
+        nsExec::ExecToStack /TIMEOUT=60000 '"$0" uninstall "$INSTDIR\bridge\${THRM_BRIDGE_EXECUTABLE}" /nologo'
+        Pop $1
+        Pop $1
+    ${EndIf}
+    Pop $1
+    Pop $0
+FunctionEnd
+!macroend
+!insertmacro THRM_NGEN_FUNCTIONS ""
+!insertmacro THRM_NGEN_FUNCTIONS "un."
+
+# Queues native image generation for the freshly installed bridge.
+Function NGenInstallBridge
+    Push $0
+    Push $1
+    Call FindNGen
+    Pop $0
+    ${If} $0 != ""
+    ${AndIf} ${FileExists} "$INSTDIR\bridge\${THRM_BRIDGE_EXECUTABLE}"
+        DetailPrint "ngen install /queue: $INSTDIR\bridge\${THRM_BRIDGE_EXECUTABLE}"
+        nsExec::ExecToStack /TIMEOUT=60000 '"$0" install "$INSTDIR\bridge\${THRM_BRIDGE_EXECUTABLE}" /queue /nologo'
+        Pop $1
+        Pop $1
+    ${EndIf}
+    Pop $1
+    Pop $0
+FunctionEnd
+
 Section "$(THRM_STR_SECTION_MAIN)" SEC_MAIN
     SectionIn RO  # Read-only, cannot be deselected
     !insertmacro wails.setShellContext
@@ -894,6 +955,8 @@ Section "$(THRM_STR_SECTION_MAIN)" SEC_MAIN
         Delete "$INSTDIR\BS2PRO-controller.exe"
         Delete "$INSTDIR\BS2PRO.exe"
         Delete "$INSTDIR\BS2PRO-Core.exe"
+        # Drop the previous bridge's native images; they no longer match the new build.
+        Call NGenUninstallBridge
         RMDir /r "$INSTDIR\bridge"
         Delete "$INSTDIR\logs\*.log"  # Keep log structure but remove old logs
     ${Else}
@@ -904,6 +967,7 @@ Section "$(THRM_STR_SECTION_MAIN)" SEC_MAIN
         
         # Clean up any leftover files from previous installation
         DetailPrint "$(THRM_STR_CLEAN_LEFTOVERS)"
+        Call NGenUninstallBridge
         RMDir /r "$INSTDIR\bridge"
         Delete "$INSTDIR\logs\*.*"
     ${EndIf}
@@ -925,6 +989,9 @@ Section "$(THRM_STR_SECTION_MAIN)" SEC_MAIN
     
     # Return to main install directory
     SetOutPath $INSTDIR
+
+    # Best-effort: pre-compile the bridge so it is not JIT-compiled on every start
+    Call NGenInstallBridge
     
     # Restore user data if this was an upgrade
     Call RestoreUserData
@@ -1275,6 +1342,7 @@ Section "uninstall"
     
     # Remove bridge directory (contains THRM TempBridge.exe and related files)
     DetailPrint "$(THRM_STR_REMOVE_BRIDGE)"
+    Call un.NGenUninstallBridge
     RMDir /r "$INSTDIR\bridge"
     
     # Remove logs directory

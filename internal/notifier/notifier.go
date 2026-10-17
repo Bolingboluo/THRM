@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
+	"github.com/TIANLI0/THRM/internal/coremsg"
 	"github.com/TIANLI0/THRM/internal/types"
 	"github.com/gen2brain/beeep"
 )
@@ -31,7 +32,7 @@ func (m *Manager) Notify(title, message string) {
 		return
 	}
 
-	toastTitle := "功能变动"
+	toastTitle := coremsg.T(coremsg.NotifyDefaultTitle)
 	if title != "" {
 		toastTitle = title
 	}

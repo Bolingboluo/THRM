@@ -29,6 +29,52 @@ const (
 
 var supportedHIDProductIDs = []uint16{ProductIDBS2PRO, ProductIDBS3, ProductIDBS3PRO, ProductIDBS2}
 
+// hidAbsentSummaryEvery 是"连续未发现 HID 设备"时输出一条 Info 汇总的间隔（按尝试次数）。
+// 连续失败的第一次照常记录，之后只在 Debug 级别记录，避免设备不在时日志被重连刷屏。
+const hidAbsentSummaryEvery = 20
+
+// hidCandidate 是一次枚举中某个受支持产品 ID 的待打开接口。
+type hidCandidate struct {
+	productID uint16
+	path      string
+}
+
+// enumerateVendorHID 一次性枚举指定厂商的全部 HID 接口（保持系统枚举顺序）。
+// 测试可替换。
+var enumerateVendorHID = func(vendorID uint16) []hidCandidate {
+	var found []hidCandidate
+	_ = hid.Enumerate(vendorID, 0, func(info *hid.DeviceInfo) error {
+		if info.VendorID == vendorID {
+			found = append(found, hidCandidate{productID: info.ProductID, path: info.Path})
+		}
+		return nil
+	})
+	return found
+}
+
+// pickHIDCandidates 按 priority 顺序为每个产品 ID 选出枚举顺序中的第一个接口，
+// 与逐个调用 hid.OpenFirst(vendorID, productID) 的选取结果一致。
+func pickHIDCandidates(found []hidCandidate, priority []uint16) []hidCandidate {
+	picked := make([]hidCandidate, 0, len(priority))
+	for _, productID := range priority {
+		for _, candidate := range found {
+			if candidate.productID == productID {
+				picked = append(picked, candidate)
+				break
+			}
+		}
+	}
+	return picked
+}
+
+func supportedHIDProductIDsText() string {
+	parts := make([]string, 0, len(supportedHIDProductIDs))
+	for _, productID := range supportedHIDProductIDs {
+		parts = append(parts, fmt.Sprintf("0x%04X", productID))
+	}
+	return strings.Join(parts, "/")
+}
+
 // idleBLEScanCooldown 限制“本会话从未连接成功”时自动重连的 BLE 扫描频率。
 //
 // Windows 上 BLE 扫描经由 WinRT 广播监听，每条收到的广播都会产生原生层分配，
@@ -80,7 +126,7 @@ const (
 	realtimeWakeVerifyDelay           = 3 * time.Second
 	gearSelectionVerifyTimeout        = 1400 * time.Millisecond
 	hidReadPollInterval               = 100 * time.Millisecond
-	// hidIdleReadPollInterval 是后台空闲（无 GUI 连接且未开启智能控温）时的轮询间隔。
+	// hidIdleReadPollInterval 是后台空闲（无前台 GUI，判据见 SetIdlePolling）时的轮询间隔。
 	// HID 句柄设为非阻塞后，读循环靠"空转即休眠"来避免占满 CPU，这意味着常驻
 	// 10 次/秒的唤醒。空闲时没人消费实时转速（托盘 5 秒才刷新一次），
 	// 放慢到 2 次/秒可显著降低后台唤醒频率与笔电待机功耗。
@@ -192,6 +238,8 @@ type Manager struct {
 	bleManager *BLEManager
 	// lastBLEScanAt 记录最近一次自动重连触发 BLE 扫描的时间，用于空闲冷却限频。
 	lastBLEScanAt time.Time
+	// hidAbsentStreak 是连续"枚举不到任何受支持 HID 接口"的连接尝试次数（受 mutex 保护）。
+	hidAbsentStreak int
 
 	// 回调函数
 	onFanDataUpdate func(data *types.FanData)
@@ -228,6 +276,25 @@ func (m *Manager) SeedLastTransport(transport string) {
 	if m.lastDeviceType == "" {
 		m.lastDeviceType = transport
 	}
+}
+
+// ReconnectPollingRelaxable 报告周期性自动重连能否放慢：仅当最近一次连接尝试连一个受支持的
+// HID 接口都没枚举到、且下一次自动重连也不会做 BS1 的 BLE 扫描时为真。
+//
+// 此时设备确实不在，下一次自动重连只会重复一遍注定落空的 HID 枚举，由 HID 接口到达通知
+// 负责及时发现设备即可。接口存在但打开失败（被其他程序占用等）、或本会话在用 BS1 时
+// 返回 false，调用方应保持原有重试频率。
+func (m *Manager) ReconnectPollingRelaxable() bool {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	if m.isConnected || m.hidAbsentStreak == 0 {
+		return false
+	}
+	var sinceLastBLEScan time.Duration = -1
+	if !m.lastBLEScanAt.IsZero() {
+		sinceLastBLEScan = time.Since(m.lastBLEScanAt)
+	}
+	return shouldSkipBLEFallback(true, m.lastDeviceType, sinceLastBLEScan)
 }
 
 // SetCallbacks 设置回调函数
@@ -306,16 +373,40 @@ func (m *Manager) connect(preferLastTransport bool) (bool, map[string]string) {
 	var device *hid.Device
 	var err error
 
+	// 只枚举一次本厂商的 HID 接口，再按 supportedHIDProductIDs 的优先级逐个打开。
+	// 原先对每个产品 ID 各调一次 hid.OpenFirst，而它内部每次都是一遍完整的系统 HID
+	// 枚举：散热器不在时，健康检查每 30 秒就要枚举 4 遍、写 4 条错误日志。
+	// 选取语义与 OpenFirst 完全一致：每个产品 ID 取枚举顺序中的第一个接口，
+	// 打开失败就换下一个产品 ID。
+	candidates := pickHIDCandidates(enumerateVendorHID(VendorID), supportedHIDProductIDs)
+	quietAbsent := false
+	if len(candidates) == 0 {
+		m.hidAbsentStreak++
+		quietAbsent = preferLastTransport && m.hidAbsentStreak > 1
+		switch {
+		case !quietAbsent:
+			m.logError("未找到受支持的 HID 设备 - 厂商ID: 0x%04X, 产品ID: %s", VendorID, supportedHIDProductIDsText())
+		case m.hidAbsentStreak%hidAbsentSummaryEvery == 0:
+			m.logInfo("仍未找到受支持的 HID 设备（已连续 %d 次自动重连未发现设备）", m.hidAbsentStreak)
+		default:
+			m.logDebug("未找到受支持的 HID 设备（连续第 %d 次）", m.hidAbsentStreak)
+		}
+	} else {
+		m.hidAbsentStreak = 0
+	}
+
 	var connectedProductID uint16
-	for _, productID := range supportedHIDProductIDs {
+	for _, candidate := range candidates {
+		productID := candidate.productID
 		m.logInfo("正在连接设备 - 厂商ID: 0x%04X, 产品ID: 0x%04X", VendorID, productID)
 
-		device, err = hid.OpenFirst(VendorID, productID)
+		device, err = hid.OpenPath(candidate.path)
 		if err == nil {
 			m.logInfo("成功连接到产品ID: 0x%04X", productID)
 			connectedProductID = productID
 			break
 		} else {
+			device = nil
 			m.logError("产品ID 0x%04X 连接失败: %v", productID, err)
 		}
 	}
@@ -373,7 +464,9 @@ func (m *Manager) connect(preferLastTransport bool) (bool, map[string]string) {
 		sinceLastBLEScan = time.Since(m.lastBLEScanAt)
 	}
 	if shouldSkipBLEFallback(preferLastTransport, m.lastDeviceType, sinceLastBLEScan) {
-		if m.lastDeviceType == types.DeviceTypeHID {
+		if m.lastDeviceType == types.DeviceTypeHID && quietAbsent {
+			m.logDebug("上次连接设备为 HID，等待 Windows 重新枚举 HID 接口，跳过仅用于 BS1 的 BLE 扫描")
+		} else if m.lastDeviceType == types.DeviceTypeHID {
 			m.logInfo("上次连接设备为 HID，等待 Windows 重新枚举 HID 接口，跳过仅用于 BS1 的 BLE 扫描")
 		} else {
 			m.logDebug("本会话尚未连接过设备，BLE 扫描处于冷却期（距上次 %v），跳过本轮扫描", sinceLastBLEScan.Round(time.Second))
@@ -650,7 +743,8 @@ func (m *Manager) GetCurrentFanData() *types.FanData {
 }
 
 // SetIdlePolling 切换 HID 读循环的空闲轮询模式。
-// 由核心在"无 GUI 连接且未开启智能控温"时开启，此时没人消费实时转速数据。
+// 由核心在"没有前台 GUI 且 RTSS 叠加层不需要亚秒级转速"时开启。智能控温每个采样
+// 周期（≥1 秒）才读一次缓存的转速，命令 ACK 则由事务标记即时唤醒读循环，都不依赖常规轮询。
 func (m *Manager) SetIdlePolling(idle bool) {
 	m.idlePolling.Store(idle)
 }
@@ -660,7 +754,9 @@ func (m *Manager) readPollInterval() time.Duration {
 	if m.activeTransactions.Load() > 0 {
 		return hidBusyReadPollInterval
 	}
-	if m.idlePolling.Load() {
+	// 本次连接还没读到过状态帧时保持常规轮询：连接就绪判定在等首个状态帧，
+	// 放慢会让它错过宽限期、改走整套设置查询，重连也随之变慢。
+	if m.idlePolling.Load() && m.currentFanData.Load() != nil {
 		return hidIdleReadPollInterval
 	}
 	return hidReadPollInterval

@@ -4,7 +4,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Sortable from 'sortablejs';
 import ConnectionRecoveryPanel from './ConnectionRecoveryPanel';
-import { motion } from 'framer-motion';
+import SpinningFanIcon from './SpinningFanIcon';
+// m + AppShell 里的 LazyMotion：动画特性异步加载，见 lib/motion-features.ts
+import { m as motion } from 'framer-motion';
 import {
   Activity,
   AlertTriangle,
@@ -33,6 +35,8 @@ import {
 import { types } from '../../../wailsjs/go/models';
 import { apiService } from '../services/api';
 import { useTemperatureHistory } from '../hooks/useTemperatureHistory';
+import { useAppStore } from '../store/app-store';
+import { useShallow } from 'zustand/react/shallow';
 import { clipHistoryToRecentWindow, downsampleHistoryPoints, HOME_CHART_WINDOW_MS, type TemperatureHistoryPoint } from '../lib/temperature-history';
 import { getManualGearLabel, getReportedMaxRpm } from '../lib/manualGearPresets';
 import type { DeviceSettings } from '../types/app';
@@ -56,8 +60,6 @@ interface DeviceStatusProps {
   deviceProductId: string | null;
   deviceModel: string | null;
   deviceSettings: DeviceSettings | null;
-  fanData: types.FanData | null;
-  temperature: types.TemperatureData | null;
   config: types.AppConfig;
   coreServiceError?: string | null;
   onConnect: () => void;
@@ -401,14 +403,6 @@ const SemiGauge = memo(function SemiGauge({ value, color, children }: SemiGaugeP
         {children}
       </div>
     </div>
-  );
-});
-
-const SpinningFanIcon = memo(function SpinningFanIcon({ duration, className }: { duration: number; className: string }) {
-  return (
-    <span className={clsx('inline-flex', duration > 0 && 'animate-spin')} style={duration > 0 ? { animationDuration: `${duration}s` } : undefined}>
-      <Fan className={className} />
-    </span>
   );
 });
 
@@ -862,6 +856,99 @@ const TemperatureHistoryPanel = memo(function TemperatureHistoryPanel({
   );
 });
 
+/* ── 实时数值 ──
+
+转速每秒最多推送 4 次、温度约 2 秒一次。这些数值由下面几个小组件各自订阅 store，
+只刷新自己；首页主体只随连接状态、配置、告警等慢变化重渲染，不再每批遥测都重建整页卡片。 */
+
+type HomeTempSource = 'max' | 'cpu' | 'gpu';
+type HomeTelemetry = types.TemperatureData | null;
+
+// 参考温度：跟随设置页“控温温度来源”(max/cpu/gpu)，无该路读数时回退到综合最高温。
+const getHomeReferenceTemp = (temperature: HomeTelemetry, source: HomeTempSource) => {
+  const cpu = temperature?.cpuTemp ?? 0;
+  const gpu = temperature?.gpuTemp ?? 0;
+  const max = temperature?.maxTemp ?? 0;
+  if (source === 'cpu') return cpu > 0 ? cpu : max;
+  if (source === 'gpu') return gpu > 0 ? gpu : max;
+  return max;
+};
+
+const LiveTempGauge = memo(function LiveTempGauge({
+  channel,
+  ...gaugeProps
+}: { channel: 'cpu' | 'gpu' } & Omit<React.ComponentProps<typeof TempGaugeDisplay>, 'temp' | 'ready' | 'laptopFanRpm'>) {
+  const temp = useAppStore((state) => (channel === 'cpu' ? state.temperature?.cpuTemp : state.temperature?.gpuTemp));
+  // 温度就绪判定：后端首次推送（updateTime > 0）且该路传感器读到非零值。
+  const pushed = useAppStore((state) => (state.temperature?.updateTime ?? 0) > 0);
+  // 笔记本内置风扇转速（机械革命等 Uniwill/同方机型）；本机不支持时恒为 0，对应角标隐藏。
+  const laptopFanRpm = useAppStore((state) => (channel === 'cpu' ? state.temperature?.cpuFanRpm : state.temperature?.gpuFanRpm) ?? 0);
+  return <TempGaugeDisplay {...gaugeProps} temp={temp} ready={pushed && (temp ?? 0) > 0} laptopFanRpm={laptopFanRpm} />;
+});
+
+const LiveFanSpinIcon = memo(function LiveFanSpinIcon({ className }: { className: string }) {
+  const duration = useAppStore((state) => getFanSpinDuration(state.fanData?.currentRpm));
+  return <SpinningFanIcon duration={duration} className={className} />;
+});
+
+const LiveFanRpmDisplay = memo(function LiveFanRpmDisplay({ isBs1, maxRpm }: { isBs1: boolean; maxRpm: number }) {
+  const currentRpm = useAppStore((state) => state.fanData?.currentRpm);
+  const targetRpm = useAppStore((state) => state.fanData?.targetRpm);
+  const setGear = useAppStore((state) => state.fanData?.setGear);
+  return <FanRpmDisplay currentRpm={currentRpm} targetRpm={targetRpm} setGear={setGear} isBs1={isBs1} maxRpm={maxRpm} />;
+});
+
+const LivePowerText = memo(function LivePowerText({ channel }: { channel: 'cpu' | 'gpu' }) {
+  const text = useAppStore((state) => {
+    const power = (channel === 'cpu' ? state.temperature?.cpuPower : state.temperature?.gpuPower) ?? 0;
+    return power > 0 ? `${Math.round(power)}W` : '--';
+  });
+  return <>{text}</>;
+});
+
+const LiveMiniFanCurveChart = memo(function LiveMiniFanCurveChart({
+  curve,
+  tempSource,
+  onOpen,
+}: {
+  curve: types.FanCurvePoint[] | undefined;
+  tempSource: HomeTempSource;
+  onOpen?: () => void;
+}) {
+  const currentTemp = useAppStore((state) => getHomeReferenceTemp(state.temperature, tempSource));
+  return <MiniFanCurveChart curve={curve} currentTemp={currentTemp} onOpen={onOpen} />;
+});
+
+// 首页主体用到的慢变化遥测：全是原始值或布尔，浅比较不变就不重渲染。
+const selectHomeSlowTelemetry = (
+  state: ReturnType<typeof useAppStore.getState>,
+  tempSource: HomeTempSource,
+  modeShowsLiveRpm: boolean,
+) => {
+  const temperature = state.temperature;
+  const fanData = state.fanData;
+  const tempPushed = (temperature?.updateTime ?? 0) > 0;
+  return {
+    cpuTempError: temperature?.cpuTempError?.trim() || '',
+    bridgeOk: temperature?.bridgeOk,
+    bridgeMessage: temperature?.bridgeMessage,
+    tempPushed,
+    gpuReady: tempPushed && (temperature?.gpuTemp ?? 0) > 0,
+    gpuHasTemperatureSensor:
+      (Array.isArray(temperature?.gpuSensors) && temperature.gpuSensors.length > 0) ||
+      (Array.isArray(temperature?.gpuDevices) &&
+        temperature.gpuDevices.some((device) => Array.isArray(device?.sensors) && device.sensors.length > 0)),
+    referenceTempUnavailable: getHomeReferenceTemp(temperature, tempSource) <= 0,
+    cpuModel: temperature?.cpuModel,
+    gpuModel: temperature?.gpuModel,
+    gearSettings: fanData?.gearSettings,
+    maxGear: fanData?.maxGear,
+    workMode: fanData?.workMode,
+    // 只有"固定转速但没填转速"时模式说明才显示实时转速，其余时候不必随转速重渲染。
+    modeRpm: modeShowsLiveRpm ? fanData?.currentRpm : undefined,
+  };
+};
+
 /* ── Main component ── */
 
 /** 桥接正常出数后 GPU 温度传感器清单持续为空多久，才认定本机没有可读温度的 GPU。 */
@@ -872,8 +959,6 @@ export default function DeviceStatus({
   deviceProductId,
   deviceModel,
   deviceSettings,
-  fanData,
-  temperature,
   config,
   coreServiceError,
   onConnect,
@@ -892,13 +977,18 @@ export default function DeviceStatus({
     source: temperatureHistorySource,
   } = useTemperatureHistory();
   const [pawnIoReinstalling, setPawnIoReinstalling] = useState(false);
+  const tempSource = (((config as any).tempSource as string) || 'max') as HomeTempSource;
+  const modeShowsLiveRpm = !config.autoControl && !!config.customSpeedEnabled && !config.customSpeedRPM;
+  const telemetry = useAppStore(useShallow(
+    (state: ReturnType<typeof useAppStore.getState>) => selectHomeSlowTelemetry(state, tempSource, modeShowsLiveRpm),
+  ));
   // CPU 读不到而 GPU 正常时 bridgeOk 仍为 true——控温靠 GPU 基准依然成立。
   // 但此时 CPU 显示为空必须给出原因和修复入口，否则用户只能看到一个没有任何
   // 解释的"无数据"。因此告警条对这两种情况都要出现。
-  const cpuTempError = temperature?.cpuTempError?.trim() || '';
-  const hasBridgeWarning = isConnected && (temperature?.bridgeOk === false || cpuTempError !== '');
-  const warningMessage = temperature?.bridgeOk === false
-    ? (temperature?.bridgeMessage || t('deviceStatus.bridgeWarning.default'))
+  const cpuTempError = telemetry.cpuTempError;
+  const hasBridgeWarning = isConnected && (telemetry.bridgeOk === false || cpuTempError !== '');
+  const warningMessage = telemetry.bridgeOk === false
+    ? (telemetry.bridgeMessage || t('deviceStatus.bridgeWarning.default'))
     : cpuTempError;
 
   useEffect(() => {
@@ -985,13 +1075,12 @@ export default function DeviceStatus({
   const modeDesc = config.autoControl
     ? t('deviceStatus.mode.smartDescription')
     : config.customSpeedEnabled
-      ? t('deviceStatus.mode.fixedDescription', { rpm: config.customSpeedRPM || fanData?.currentRpm || '--' })
+      ? t('deviceStatus.mode.fixedDescription', { rpm: config.customSpeedRPM || telemetry.modeRpm || '--' })
       : t('deviceStatus.mode.manualDescription');
   const modeDisplayTitle = activeCurveProfileName
     ? t('deviceStatus.mode.withProfile', { mode: modeTitle, profile: activeCurveProfileName })
     : modeTitle;
-  const fanSpinDuration = getFanSpinDuration(fanData?.currentRpm);
-  const maxRpmInfo = useMemo(() => getReportedMaxRpm(fanData?.gearSettings, fanData?.maxGear), [fanData?.gearSettings, fanData?.maxGear]);
+  const maxRpmInfo = useMemo(() => getReportedMaxRpm(telemetry.gearSettings, telemetry.maxGear), [telemetry.gearSettings, telemetry.maxGear]);
   const deviceExtremeRPM = deviceSettings?.gearRpmTable?.find((item) => item.label === 'extreme')?.rpm;
   const reportedMaxRpm = maxRpmInfo.rpm;
   const maxGearHighLevelRpm = (isBs1Model || isBs2Model || isBs3Model)
@@ -999,21 +1088,18 @@ export default function DeviceStatus({
     : reportedMaxRpm || deviceExtremeRPM;
   // 温度就绪判定：后端首次推送（updateTime > 0）且该路传感器读到非零值。
   // 单独按通路判 — 只有 GPU 没装独显时仍会保持 0，但 CPU 已就绪则只显示 GPU 占位。
-  const tempPushed = (temperature?.updateTime ?? 0) > 0;
-  const cpuReady = tempPushed && (temperature?.cpuTemp ?? 0) > 0;
-  const gpuReady = tempPushed && (temperature?.gpuTemp ?? 0) > 0;
+  // CPU/GPU 卡片里的就绪判定由 LiveTempGauge 按同一规则自行计算。
+  const tempPushed = telemetry.tempPushed;
+  const gpuReady = telemetry.gpuReady;
   // 没有独显的机器（或混合显卡不想唤醒独显）会在设置里停用 GPU 监测：此后 GPU 读数恒为 0，
   // 首页与托盘同一规则，不再给 GPU 留卡片和功耗格，而不是摆一个永远读不到数的占位。
   const gpuMonitoringDisabled = !!(config as any).disableGpuMonitoring;
   // 监测开着、桥接也正常出数，却没有任何一块 GPU 带温度传感器：多半是没有独显、核显又不报温度
   // （Linux 上则是没有 NVIDIA 显卡）。这种状态不会自己好转，与其一直"读取中…"，
   // 不如说明原因并给出一键停用。桥接启动/故障期间 bridgeOk 为 false，那时的空清单不作数。
-  const gpuHasTemperatureSensor =
-    (Array.isArray(temperature?.gpuSensors) && temperature.gpuSensors.length > 0) ||
-    (Array.isArray(temperature?.gpuDevices) &&
-      temperature.gpuDevices.some((device) => Array.isArray(device?.sensors) && device.sensors.length > 0));
+  const gpuHasTemperatureSensor = telemetry.gpuHasTemperatureSensor;
   const gpuLooksAbsent =
-    isConnected && !gpuMonitoringDisabled && tempPushed && temperature?.bridgeOk !== false && !gpuReady && !gpuHasTemperatureSensor;
+    isConnected && !gpuMonitoringDisabled && tempPushed && telemetry.bridgeOk !== false && !gpuReady && !gpuHasTemperatureSensor;
   const [gpuAbsentConfirmed, setGpuAbsentConfirmed] = useState(false);
   const [gpuMonitoringDisabling, setGpuMonitoringDisabling] = useState(false);
 
@@ -1043,16 +1129,8 @@ export default function DeviceStatus({
       setGpuMonitoringDisabling(false);
     }
   }, [config, onConfigChange, t]);
-  // 参考温度：跟随设置页“控温温度来源”(max/cpu/gpu)，无该路读数时回退到综合最高温。
-  const referenceTemp = (() => {
-    const source = (((config as any).tempSource as string) || 'max') as 'max' | 'cpu' | 'gpu';
-    const cpu = temperature?.cpuTemp ?? 0;
-    const gpu = temperature?.gpuTemp ?? 0;
-    const max = temperature?.maxTemp ?? 0;
-    if (source === 'cpu') return cpu > 0 ? cpu : max;
-    if (source === 'gpu') return gpu > 0 ? gpu : max;
-    return max;
-  })();
+  // 参考温度（见 getHomeReferenceTemp）读不到时显示恢复引导；具体数值只有迷你曲线图用，由它自行订阅。
+  const referenceTempUnavailable = telemetry.referenceTempUnavailable;
   const bridgeStateLabel = bridgeStatus?.state === 'running_owned'
     ? t('deviceStatus.bridgeState.runningOwned')
     : bridgeStatus?.state === 'attached'
@@ -1083,11 +1161,6 @@ export default function DeviceStatus({
           : maxRpmInfo.codeHex
             ? t('deviceStatus.maxRpmHint.unknownCode', { code: maxRpmInfo.codeHex })
             : t('deviceStatus.maxRpmHint.waiting');
-  const cpuPowerText = (temperature?.cpuPower ?? 0) > 0 ? `${Math.round(temperature?.cpuPower ?? 0)}W` : '--';
-  const gpuPowerText = (temperature?.gpuPower ?? 0) > 0 ? `${Math.round(temperature?.gpuPower ?? 0)}W` : '--';
-  // 笔记本内置风扇转速（机械革命等 Uniwill/同方机型）；本机不支持时恒为 0，对应角标隐藏。
-  const laptopCpuFanRpm = temperature?.cpuFanRpm ?? 0;
-  const laptopGpuFanRpm = temperature?.gpuFanRpm ?? 0;
 
   /* ── 首页卡片排序 ── */
   const [cardOrder, setCardOrder] = useState<HomeCardId[]>(HOME_CARD_IDS);
@@ -1277,7 +1350,7 @@ export default function DeviceStatus({
           icon={<Cpu className="h-4 w-4" />}
           label={t('deviceStatus.metrics.cpuTemperature')}
         />
-        <TempGaugeDisplay temp={temperature?.cpuTemp} ready={cpuReady} laptopFanRpm={laptopCpuFanRpm} />
+        <LiveTempGauge channel="cpu" />
       </div>
     ) : null,
     gpu: isConnected && !gpuMonitoringDisabled ? (
@@ -1286,10 +1359,8 @@ export default function DeviceStatus({
           icon={<Gpu className="h-4 w-4" />}
           label={t('deviceStatus.metrics.gpuTemperature')}
         />
-        <TempGaugeDisplay
-          temp={temperature?.gpuTemp}
-          ready={gpuReady}
-          laptopFanRpm={laptopGpuFanRpm}
+        <LiveTempGauge
+          channel="gpu"
           unavailableHint={gpuAbsentConfirmed ? t('deviceStatus.gpuAbsent.hint') : undefined}
           unavailableActionLabel={t('deviceStatus.gpuAbsent.action')}
           unavailableActionTooltip={t('deviceStatus.gpuAbsent.actionTooltip')}
@@ -1302,14 +1373,11 @@ export default function DeviceStatus({
       <div className="glacier-metric-card flex h-full min-h-[155px] flex-col items-center rounded-xl border border-border bg-card px-5 py-3 shadow-sm shadow-black/5 transition-shadow hover:shadow-md hover:shadow-primary/10 md:min-h-[171px] min-[1800px]:min-h-[212px] min-[1800px]:px-7 min-[1800px]:py-5">
         <MetricHeader
           icon={(
-            <SpinningFanIcon duration={fanSpinDuration} className="h-4 w-4" />
+            <LiveFanSpinIcon className="h-4 w-4" />
           )}
           label={t('deviceStatus.metrics.fanRpm')}
         />
-        <FanRpmDisplay
-          currentRpm={fanData?.currentRpm}
-          targetRpm={fanData?.targetRpm}
-          setGear={fanData?.setGear}
+        <LiveFanRpmDisplay
           isBs1={isBs1Model}
           maxRpm={maxGearHighLevelRpm || 4000}
         />
@@ -1331,8 +1399,8 @@ export default function DeviceStatus({
             </div>
             {/* 停用 GPU 监测后核心会清空 gpuModel，但 GUI 合并推送时把空值当"未变化"沿用上一帧，这里要自己挡掉。 */}
             <HardwareIdentitySummary
-              cpuModel={temperature?.cpuModel}
-              gpuModel={gpuMonitoringDisabled ? undefined : temperature?.gpuModel}
+              cpuModel={telemetry.cpuModel}
+              gpuModel={gpuMonitoringDisabled ? undefined : telemetry.gpuModel}
             />
           </div>
 
@@ -1381,7 +1449,7 @@ export default function DeviceStatus({
                 <Fan className="h-3.5 w-3.5" />
                 {t('deviceStatus.stats.workMode')}
               </div>
-              <div className="text-sm font-semibold">{getTranslatedWorkMode(fanData?.workMode, t)}</div>
+              <div className="text-sm font-semibold">{getTranslatedWorkMode(telemetry.workMode, t)}</div>
             </div>
 
             <div className="glacier-stat-tile rounded-xl border border-border bg-background/55 p-3 min-[1800px]:p-4">
@@ -1389,7 +1457,7 @@ export default function DeviceStatus({
                 <Zap className="h-3.5 w-3.5" />
                 {t('deviceStatus.stats.cpuPower')}
               </div>
-              <div className="text-sm font-semibold tabular-nums">{cpuPowerText}</div>
+              <div className="text-sm font-semibold tabular-nums"><LivePowerText channel="cpu" /></div>
             </div>
 
             {!gpuMonitoringDisabled && (
@@ -1398,7 +1466,7 @@ export default function DeviceStatus({
                   <Activity className="h-3.5 w-3.5" />
                   {t('deviceStatus.stats.gpuPower')}
                 </div>
-                <div className="text-sm font-semibold tabular-nums">{gpuPowerText}</div>
+                <div className="text-sm font-semibold tabular-nums"><LivePowerText channel="gpu" /></div>
               </div>
             )}
 
@@ -1407,7 +1475,7 @@ export default function DeviceStatus({
         </motion.div>
     ) : null,
     curve: isConnected ? (
-      <MiniFanCurveChart curve={homeCurve} currentTemp={referenceTemp} onOpen={onOpenCurveEditor} />
+      <LiveMiniFanCurveChart curve={homeCurve} tempSource={tempSource} onOpen={onOpenCurveEditor} />
     ) : null,
     history: isConnected ? (
       <TemperatureHistoryPanel
@@ -1433,11 +1501,11 @@ export default function DeviceStatus({
       )}
 
       {/* ── Recovery guide while connected but core/temperature has issues ── */}
-      {isConnected && (!!coreServiceError || (tempPushed && referenceTemp <= 0)) && (
+      {isConnected && (!!coreServiceError || (tempPushed && referenceTempUnavailable)) && (
         <ConnectionRecoveryPanel
           connected
           coreError={coreServiceError}
-          temperatureUnavailable={tempPushed && referenceTemp <= 0}
+          temperatureUnavailable={tempPushed && referenceTempUnavailable}
           onRetry={onConnect}
         />
       )}
@@ -1463,7 +1531,7 @@ export default function DeviceStatus({
                     )}
                     {bridgeStatus.transport && <p>{t('deviceStatus.bridgeWarning.transportLine', { transport: bridgeStatus.transport })}</p>}
                     {bridgeStatus.pipeName && <p>{t('deviceStatus.bridgeWarning.pipeLine', { pipe: bridgeStatus.pipeName })}</p>}
-                    {bridgeStatus.lastError && bridgeStatus.lastError !== temperature?.bridgeMessage && <p>{t('deviceStatus.bridgeWarning.diagnosticsLine', { message: bridgeStatus.lastError })}</p>}
+                    {bridgeStatus.lastError && bridgeStatus.lastError !== telemetry.bridgeMessage && <p>{t('deviceStatus.bridgeWarning.diagnosticsLine', { message: bridgeStatus.lastError })}</p>}
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1548,7 +1616,7 @@ export default function DeviceStatus({
   const cardColumns = gpuMonitoringDisabled ? HOME_CARD_COLUMNS_WITHOUT_GPU : HOME_CARD_COLUMNS;
   // 三条引导都不显示时不要留一个空的栅格项，否则概览卡下面会多出一段空行。
   const showConnectionGuides =
-    !isConnected || !!coreServiceError || (tempPushed && referenceTemp <= 0) || bridgeWarningReady;
+    !isConnected || !!coreServiceError || (tempPushed && referenceTempUnavailable) || bridgeWarningReady;
 
   // 先把栅格项按渲染顺序摊平（卡片 + 跟在概览后面的连接引导），再按 12 栅格分行。
   // 引导块占满整行，所以它自成一行，不会把下一行的卡片挤到别的分组里去。
