@@ -7,8 +7,9 @@ set "PROJECT=%ROOT%bridge\TempBridge\TempBridge.csproj"
 set "OUTDIR=%ROOT%build\bin\bridge"
 set "BUILDROOT=%ROOT%build\bin"
 set "TEMPROOT=%ROOT%temp"
-rem THRM fork of LibreHardwareMonitor. Its default branch main = upstream master
-rem + PR #2396 (Fire Range / Zen 5 X3D CPU power & topology). See temp\LibreHardwareMonitor.
+rem THRM fork of LibreHardwareMonitor. Its default branch main tracks upstream master;
+rem PR #2396 (Fire Range / Zen 5 X3D CPU power & topology) was merged upstream in 2026-10,
+rem so main currently matches upstream content. Keep syncing with "Merge upstream master into main".
 set "LHM_URL=https://github.com/TIANLI0/LibreHardwareMonitor.git"
 set "LHM_BRANCH=main"
 set "LHM_REPO=%TEMPROOT%\LibreHardwareMonitor"
