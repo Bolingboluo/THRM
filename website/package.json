@@ -1,0 +1,33 @@
+{
+  "name": "thrm-website",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.33.0",
+    "next": "^16.3.2",
+    "next-themes": "^0.4.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5"
+  }
+}

@@ -1,0 +1,367 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 颜色令牌与桌面端 frontend/src/app/globals.css 保持一致：
+   浅色是冰川蓝，深色切到熔岩橙，官网和 App 换主题时是同一套身份色。 */
+:root {
+  --background: #f6f8fc;
+  --foreground: #111827;
+  --card: #ffffff;
+  --muted: #edf2f9;
+  --muted-foreground: #66758a;
+  --border: #e1e7f0;
+  --input: #d3ddea;
+  --ring: #2f6df6;
+  --primary: #2f6df6;
+  --primary-foreground: #ffffff;
+  --chart-grid: #e8edf5;
+  --chart-tick: #6b7280;
+  --chart-temperature-indicator: #ef4444;
+  --chart-adaptive: #8b5cf6;
+  --viz-3: #1baf7a;
+  --viz-4: #eda100;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #111827;
+  --sidebar-accent: #eef4ff;
+  --sidebar-border: #e5ebf4;
+  /* 首页 App 窗口模拟 Win11 云母：壁纸取色后的底，内容面板为 75% 背景色 */
+  --mica: #e3e9f3;
+
+  /* 官网专用：THRM 主题里的蓝图网格与 HUD 取景框 */
+  --grid-line: rgba(47, 109, 246, 0.06);
+  --hud: rgba(47, 109, 246, 0.42);
+  --hud-soft: rgba(47, 109, 246, 0.2);
+  --glow-a: rgba(150, 207, 255, 0.32);
+  --glow-b: rgba(47, 109, 246, 0.12);
+  --plate: #eef2f8;
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #07090d;
+  --foreground: #eef2f7;
+  --card: #11161d;
+  --muted: #1a2029;
+  --muted-foreground: #98a2b3;
+  --border: #232a35;
+  --input: #2b3442;
+  --ring: #ff4b26;
+  --primary: #ff4b26;
+  --primary-foreground: #fff7f3;
+  --chart-grid: #252b35;
+  --chart-tick: #98a2b3;
+  --chart-temperature-indicator: #ff7048;
+  --chart-adaptive: #a78bfa;
+  --viz-3: #199e70;
+  --viz-4: #c98500;
+  --sidebar: #0a0d12;
+  --sidebar-foreground: #e8edf5;
+  --sidebar-accent: #171c24;
+  --sidebar-border: #202631;
+  --mica: #1b1e25;
+
+  --grid-line: rgba(255, 75, 38, 0.045);
+  --hud: rgba(255, 75, 38, 0.46);
+  --hud-soft: rgba(255, 75, 38, 0.2);
+  --glow-a: rgba(255, 112, 72, 0.14);
+  --glow-b: rgba(255, 75, 38, 0.08);
+  --plate: #e9edf3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-plate: var(--plate);
+
+  --font-sans: "Manrope Variable", var(--font-harmony), "HarmonyOS Sans SC", "Microsoft YaHei UI", "PingFang SC",
+    "Hiragino Sans GB", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+
+  --animate-led-rotate: led-rotate 3s linear infinite;
+  --animate-led-flow: led-flow 2.4s linear infinite;
+  --animate-led-breathe: led-breathe 2.8s ease-in-out infinite;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+    font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+    font-synthesis-weight: none;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+/* 蓝图网格：取自 THRM 主题的 .glacier-shell::before，上下边缘淡出 */
+.blueprint {
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 72%, var(--grid-line) 72% 73%, transparent 73%);
+  background-size: 28px 28px, 28px 28px, 180px 180px;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 82%, transparent 100%);
+}
+
+.hero-glow {
+  background:
+    radial-gradient(circle at 78% 18%, var(--glow-a), transparent 30rem),
+    radial-gradient(circle at 12% 88%, var(--glow-b), transparent 26rem);
+}
+
+/* HUD 取景框：四角加重的内描边，THRM 主题里指标卡/图表卡的标志 */
+.hud {
+  position: relative;
+  isolation: isolate;
+}
+.hud::before {
+  content: "";
+  position: absolute;
+  inset: 0.6rem;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 0.6rem;
+  background:
+    linear-gradient(90deg, var(--hud) 0 30px, transparent 30px calc(100% - 30px), var(--hud-soft) calc(100% - 30px) 100%) top / 100% 1px no-repeat,
+    linear-gradient(90deg, var(--hud-soft), transparent 36%, transparent 64%, var(--hud-soft)) bottom / 100% 1px no-repeat,
+    linear-gradient(var(--hud) 0 20px, transparent 20px calc(100% - 20px), var(--hud-soft) calc(100% - 20px) 100%) left / 1px 100% no-repeat,
+    linear-gradient(var(--hud-soft) 0 20px, transparent 20px calc(100% - 20px), var(--hud) calc(100% - 20px) 100%) right / 1px 100% no-repeat;
+  opacity: 0.7;
+}
+
+/* 右下角的短斜纹，取自 THRM 主题的指标卡 ::after */
+.hatch {
+  background: repeating-linear-gradient(135deg, var(--hud) 0 4px, transparent 4px 8px);
+  opacity: 0.6;
+}
+
+/* 字标里那道斜切：品牌唯一的装饰母题 */
+.slash {
+  display: inline-block;
+  height: 0.32em;
+  width: 1.1em;
+  background: var(--primary);
+  transform: skewX(-45deg);
+}
+
+/* ── 首页 App 窗口：照搬 frontend/src/app/globals.css 里云母材质（glacier-native-backdrop）的那几条规则 ── */
+.app-mock {
+  background:
+    radial-gradient(circle at 85% 0%, color-mix(in srgb, var(--primary) 14%, transparent), transparent 55%),
+    var(--mica);
+}
+.app-mock-shell {
+  background: color-mix(in srgb, var(--background) 35%, transparent);
+}
+.app-mock-panel {
+  background: color-mix(in srgb, var(--background) 75%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-top-left-radius: 1rem;
+  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+.dark .app-mock-panel {
+  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.06) inset;
+}
+.app-mock .status-chip {
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+}
+.app-mock .status-chip--tint {
+  background: color-mix(in srgb, var(--primary) 12%, var(--card));
+}
+.app-mock-scroll {
+  scrollbar-width: none;
+}
+.app-mock-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.fan-spin {
+  animation: fan-rotate 1s linear infinite;
+}
+
+@keyframes fan-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes led-rotate {
+  to {
+    filter: hue-rotate(360deg);
+  }
+}
+.flow-mask {
+  mask-image: linear-gradient(90deg, transparent, #000, transparent);
+  mask-size: 45% 100%;
+  mask-repeat: no-repeat;
+}
+@keyframes led-flow {
+  from {
+    mask-position: -90% 0;
+  }
+  to {
+    mask-position: 190% 0;
+  }
+}
+@keyframes led-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 学习倾向切换时曲线平滑变形（Chromium / Firefox 支持 d 属性过渡，Safari 直接跳变） */
+.morph-path {
+  transition: d 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 更新日志正文（GitHub 渲染的 body_html） */
+.release-notes {
+  font-size: 15px;
+  line-height: 1.75;
+  color: color-mix(in srgb, var(--foreground) 88%, transparent);
+  overflow-wrap: anywhere;
+}
+.release-notes > :first-child {
+  margin-top: 0;
+}
+.release-notes :is(h1, h2, h3, h4) {
+  margin: 1.6em 0 0.6em;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--foreground);
+}
+.release-notes h1 {
+  font-size: 1.25rem;
+}
+.release-notes h2 {
+  font-size: 1.125rem;
+}
+.release-notes :is(h3, h4) {
+  font-size: 1rem;
+}
+.release-notes :is(p, ul, ol, blockquote, pre, table) {
+  margin: 0.75em 0;
+}
+.release-notes :is(ul, ol) {
+  padding-left: 1.4em;
+}
+.release-notes ul {
+  list-style: disc;
+}
+.release-notes ol {
+  list-style: decimal;
+}
+.release-notes li + li {
+  margin-top: 0.25em;
+}
+.release-notes li::marker {
+  color: var(--muted-foreground);
+}
+.release-notes a {
+  color: var(--primary);
+  text-underline-offset: 3px;
+}
+.release-notes a:hover {
+  text-decoration: underline;
+}
+.release-notes code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 0.12em 0.4em;
+  border-radius: 0.35rem;
+  background: var(--muted);
+}
+.release-notes pre {
+  overflow-x: auto;
+  padding: 0.9rem 1rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border);
+  background: var(--muted);
+}
+.release-notes pre code {
+  padding: 0;
+  background: none;
+}
+.release-notes blockquote {
+  padding-left: 1em;
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+}
+.release-notes img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+.release-notes table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.release-notes :is(th, td) {
+  padding: 0.4em 0.75em;
+  border: 1px solid var(--border);
+}
+.release-notes hr {
+  margin: 1.5em 0;
+  border-color: var(--border);
+}
+
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .fan-spin,
+  .animate-led-rotate,
+  .animate-led-flow,
+  .animate-led-breathe {
+    animation: none !important;
+  }
+  .morph-path {
+    transition: none;
+  }
+}
