@@ -205,24 +205,33 @@ jobs:
       - name: Ensure NSIS
         shell: pwsh
         run: |
-          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
-            # Chocolatey 社区源偶尔返回 499，重试几次再判失败
-            $installed = $false
-            for ($attempt = 1; $attempt -le 4 -and -not $installed; $attempt++) {
+          $nsisPath = 'C:\Program Files (x86)\NSIS'
+          $makensis = Join-Path $nsisPath 'makensis.exe'
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue) -and -not (Test-Path $makensis)) {
+            # Chocolatey 社区源偶发 499/503，而且失败时 choco 仍可能返回 0（"installed 0/0 packages"），
+            # 所以以 makensis.exe 是否存在为准；源一直不可用时改从 NSIS 官方的 SourceForge 下载。
+            for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
               choco install nsis -y --no-progress
-              if ($LASTEXITCODE -eq 0) {
-                $installed = $true
-              } else {
-                Write-Warning "choco install nsis failed (attempt $attempt), retrying..."
+              if (-not (Test-Path $makensis)) {
+                Write-Warning "choco install nsis did not produce makensis (attempt $attempt)"
                 Start-Sleep -Seconds (15 * $attempt)
               }
             }
-            if (-not $installed) { throw 'Failed to install NSIS via Chocolatey' }
+            if (-not (Test-Path $makensis)) {
+              Write-Warning 'Falling back to the NSIS installer from SourceForge'
+              $setup = Join-Path $env:RUNNER_TEMP 'nsis-setup.exe'
+              Invoke-WebRequest -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11-setup.exe' -OutFile $setup -UserAgent 'Wget' -MaximumRetryCount 3 -RetryIntervalSec 10
+              Start-Process -FilePath $setup -ArgumentList '/S' -Wait
+            }
+            # 装不上就直接失败：否则 Wails 只会警告并跳过安装包，发版时才在重新打包那一步报错
+            if (-not (Test-Path $makensis)) { throw 'Failed to install NSIS' }
           }
-          $nsisPath = 'C:\Program Files (x86)\NSIS'
           if (Test-Path $nsisPath) {
             Add-Content -Path $env:GITHUB_PATH -Value $nsisPath
           }
+          $exe = if (Test-Path $makensis) { $makensis } else { (Get-Command makensis).Source }
+          & $exe /VERSION
+          exit 0
 
       - name: Cache frontend dependencies
         uses: actions/cache@v4
