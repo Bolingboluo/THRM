@@ -33,6 +33,7 @@ bun run build    # 输出 out/
             ├─ /api/github/*        ──► api.github.com/repos/TIANLI0/THRM/*（缓存 120 秒）
             ├─ /download/latest/*   ──► GitHub latest/download，302 改写回本站
             ├─ /download/<标签>/*   ──► GitHub releases/download，服务器跟随跳转流式转发
+            ├─ /credits.json        ──► 仓库 main 分支的 credits.json（缓存 60 秒）
             └─ 其余页面             ──► thrm.vercel.app（Vercel 项目 thrm）
 ```
 
@@ -45,5 +46,6 @@ bun run build    # 输出 out/
   规则全部用 `^~` 前缀匹配，是为了避开宝塔站点配置里默认的 `.js/.css`/图片正则（`.*\.(js|css)?$` 连 `.exe` 都会匹配）。
 - `/api/github/` 未带 GitHub token，靠 120 秒缓存把请求压在每小时 60 次的匿名额度内；限流或出错时继续返回旧数据。
   需要更实时的话，在规则里加一行 `proxy_set_header Authorization "Bearer <只读 token>";`，再把缓存时间调短。
-- 规则里的 `sub_filter` 会把接口 JSON 里的 GitHub 下载地址换成本站，所以 `https://thrm.tianli0.top/api/github/releases/latest`
-  可以直接给桌面端当更新接口用（把 `frontend/src/app/lib/brand.ts` 里的 `latestReleaseApiUrl` / `releasesApiUrl` 换掉即可，字段结构不变）。
+- 规则里的 `sub_filter` 会把接口 JSON 里的 GitHub 下载地址换成本站。桌面端（`frontend/src/app/lib/brand.ts`）检查更新、
+  下载安装包和读取 `/credits.json` 鸣谢清单时都先走本站，失败再回退 GitHub；Go 端下载失败时也会自动改用 GitHub 直链。
+  所以这里的路径和返回格式要保持稳定。

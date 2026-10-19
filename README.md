@@ -14,6 +14,7 @@
 [![License](https://img.shields.io/github/license/TIANLI0/THRM)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/TIANLI0/THRM?style=flat)](https://github.com/TIANLI0/THRM/stargazers)
 
+[官网](https://thrm.tianli0.top) ·
 [下载](#下载与安装) ·
 [功能](#主要功能) ·
 [设备兼容性](#设备兼容性) ·
@@ -24,7 +25,7 @@
 </div>
 
 > [!IMPORTANT]
-> 普通用户只需要从 [Releases](https://github.com/TIANLI0/THRM/releases/latest) 下载对应安装包，不需要安装 Go、Bun、Wails、Node.js 或 .NET SDK。
+> 普通用户只需要从 [官网](https://thrm.tianli0.top/#download)（国内可直接下载）或 [Releases](https://github.com/TIANLI0/THRM/releases/latest) 下载对应安装包，不需要安装 Go、Bun、Wails、Node.js 或 .NET SDK。
 
 > [!WARNING]
 > THRM 是由社区开发的第三方开源项目，与飞智官方无关。自定义转速、非官方最低转速和实验性功能可能带来额外风险，请根据设备实际情况谨慎使用。
@@ -121,7 +122,7 @@ BS2、BS2 Pro、BS3 和 BS3 Pro 在完成系统蓝牙配对后，会以 HID 设�
 
 前往：
 
-**[GitHub Releases](https://github.com/TIANLI0/THRM/releases/latest)**
+**[THRM 官网](https://thrm.tianli0.top/#download)**（国内推荐，安装包由官网服务器转发）或 **[GitHub Releases](https://github.com/TIANLI0/THRM/releases/latest)**
 
 ### Windows
 

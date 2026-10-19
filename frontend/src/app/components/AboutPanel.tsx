@@ -16,6 +16,7 @@ import {
   Cpu,
   Download,
   ExternalLink,
+  Globe,
   Heart,
   Mail,
   MessageCircleMore,
@@ -30,7 +31,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
-import { BRAND } from '../lib/brand';
+import { BRAND, websiteChangelogUrl } from '../lib/brand';
+import { fetchJsonWithFallback } from '../lib/fetch-with-fallback';
 import { OPEN_SOURCE_GROUPS, OPEN_SOURCE_TOTAL } from '../lib/open-source-notices';
 import { apiService } from '../services/api';
 import { useAppStore } from '../store/app-store';
@@ -412,16 +414,17 @@ export default function AboutPanel() {
 
       try {
         let targetRelease: GithubRelease | null = null;
+        // 0 表示数据来自官网反代：安装包地址已被改写到官网 /download，Release 页面也用官网的更新日志
+        let sourceIndex = 0;
 
         if (channel === 'prerelease') {
-          const response = await fetch(`${BRAND.releasesApiUrl}?per_page=30`, {
-            headers,
-            signal: controller.signal,
-          });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-          const releases = (await response.json()) as GithubRelease[];
+          const result = await fetchJsonWithFallback<GithubRelease[]>(
+            BRAND.releasesApiUrls.map((url) => `${url}?per_page=30`),
+            { headers, signal: controller.signal },
+          );
           if (isStale()) return;
+          sourceIndex = result.sourceIndex;
+          const releases = result.data;
           targetRelease =
             (Array.isArray(releases) ? releases : []).find(
               (item) => !item?.draft && !!item?.prerelease,
@@ -436,27 +439,28 @@ export default function AboutPanel() {
             return;
           }
         } else {
-          const response = await fetch(BRAND.latestReleaseApiUrl, {
-            headers,
-            signal: controller.signal,
-          });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          targetRelease = (await response.json()) as GithubRelease;
+          const result = await fetchJsonWithFallback<GithubRelease>(
+            BRAND.latestReleaseApiUrls,
+            { headers, signal: controller.signal },
+          );
           if (isStale()) return;
+          sourceIndex = result.sourceIndex;
+          targetRelease = result.data;
         }
 
+        const releasePageUrl =
+          sourceIndex === 0
+            ? websiteChangelogUrl(targetRelease?.tag_name || '')
+            : targetRelease?.html_url || BRAND.latestReleaseUrl;
         setLatestReleaseTag(targetRelease?.tag_name || '');
-        setLatestReleaseUrl(targetRelease?.html_url || BRAND.latestReleaseUrl);
+        setLatestReleaseUrl(releasePageUrl);
         setLatestReleaseBody(
           typeof targetRelease?.body === 'string'
             ? targetRelease.body.trim()
             : '',
         );
         setLatestReleaseIsPrerelease(!!targetRelease?.prerelease);
-        setRelease(
-          findInstallerAsset(targetRelease?.assets),
-          targetRelease?.html_url || BRAND.latestReleaseUrl,
-        );
+        setRelease(findInstallerAsset(targetRelease?.assets), releasePageUrl);
       } catch {
         if (isStale()) return;
         setLatestReleaseTag('');
@@ -500,12 +504,8 @@ export default function AboutPanel() {
     let disposed = false;
     setCreditsLoading(true);
     setCreditsError(false);
-    fetch(BRAND.creditsUrl, { cache: 'no-cache' })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then((data: Partial<CreditsData>) => {
+    fetchJsonWithFallback<Partial<CreditsData>>(BRAND.creditsUrls, { cache: 'no-cache' })
+      .then(({ data }) => {
         if (disposed) return;
         setCredits({
           contributors: Array.isArray(data?.contributors)
@@ -730,6 +730,15 @@ export default function AboutPanel() {
             <div className="mt-5 flex flex-wrap gap-2.5">
               <Button
                 variant="primary"
+                size="sm"
+                onClick={() => openUrl(BRAND.websiteUrl)}
+                icon={<Globe className="h-4 w-4" />}
+              >
+                {t('aboutPanel.contact.website')}
+              </Button>
+
+              <Button
+                variant="outline"
                 size="sm"
                 onClick={() => openUrl(BRAND.repositoryUrl)}
                 icon={<SiGithub className="h-4 w-4" />}
@@ -1411,6 +1420,25 @@ export default function AboutPanel() {
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                     {t('aboutPanel.contact.feedbackGroupEntry')}
+                  </span>
+                </span>
+                <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => openUrl(BRAND.websiteUrl)}
+                className={LINK_ROW_CLASS}
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted/70 text-muted-foreground transition-colors group-hover:text-primary">
+                  <Globe className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium text-foreground">
+                    {t('aboutPanel.contact.website')}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    {BRAND.websiteUrl.replace(/^https?:\/\//, '')}
                   </span>
                 </span>
                 <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />

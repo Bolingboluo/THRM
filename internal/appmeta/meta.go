@@ -22,6 +22,9 @@ const (
 	ProtocolVersion      = "3.0"
 	RepositoryURL        = "https://github.com/TIANLI0/THRM"
 	LatestReleaseURL     = RepositoryURL + "/releases/latest"
+	// WebsiteURL 是官网。香港服务器在 /download 下反代 GitHub Release，国内下载更新优先走这里。
+	WebsiteURL  = "https://" + WebsiteHost
+	WebsiteHost = "thrm.tianli0.top"
 )
 
 func IPCPipeCandidates() []string {

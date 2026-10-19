@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -58,15 +59,23 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: e.Error()})
 		return e
 	}
-	host := strings.ToLower(parsed.Host)
-	if host != "github.com" && !strings.HasSuffix(host, ".github.com") &&
-		!strings.HasSuffix(host, "githubusercontent.com") && host != "objects.githubusercontent.com" {
+	if !isAllowedUpdateHost(parsed.Host) {
 		e := fmt.Errorf("下载地址不在允许的来源内: %s", parsed.Host)
 		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: e.Error()})
 		return e
 	}
 
-	installerPath, err := a.downloadUpdateInstaller(parsed.String())
+	var installerPath string
+	for i, candidate := range updateDownloadCandidates(parsed) {
+		if i > 0 {
+			guiLogger.Warnf("从官网下载更新失败，改用 GitHub 重试: %v", err)
+			a.emitUpdateProgress(updateProgress{Percent: 0, Stage: "downloading"})
+		}
+		installerPath, err = a.downloadUpdateInstaller(candidate)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		guiLogger.Errorf("下载更新安装包失败: %v", err)
 		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: err.Error()})
@@ -97,6 +106,32 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 		}
 	}()
 	return nil
+}
+
+// isAllowedUpdateHost 只允许从官网反代和 GitHub 下载安装包。
+func isAllowedUpdateHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == appmeta.WebsiteHost ||
+		host == "github.com" || strings.HasSuffix(host, ".github.com") ||
+		strings.HasSuffix(host, "githubusercontent.com")
+}
+
+// updateDownloadCandidates 返回依次尝试的下载地址。官网反代的地址
+// （/download/<标签>/<文件> 或 /download/latest/<文件>）后面追加对应的 GitHub 直链，
+// 反代不可用时自动回退到 GitHub。
+func updateDownloadCandidates(u *url.URL) []string {
+	candidates := []string{u.String()}
+	if !strings.EqualFold(u.Host, appmeta.WebsiteHost) {
+		return candidates
+	}
+	parts := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	if len(parts) != 3 || parts[0] != "download" || parts[1] == "" || parts[2] == "" {
+		return candidates
+	}
+	if parts[1] == "latest" {
+		return append(candidates, appmeta.RepositoryURL+"/releases/latest/download/"+parts[2])
+	}
+	return append(candidates, appmeta.RepositoryURL+"/releases/download/"+parts[1]+"/"+parts[2])
 }
 
 func (a *App) downloadUpdateInstaller(downloadURL string) (string, error) {
