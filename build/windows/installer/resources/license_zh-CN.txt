@@ -1,0 +1,51 @@
+﻿THRM 用户协议
+
+更新日期：2026-10-20
+
+请在安装前仔细阅读本协议。勾选同意并继续安装，即表示你已阅读、理解并同意以下全部条款；如不同意，请取消安装。
+
+一、免责声明
+
+1. THRM 是由社区开发的第三方开源软件，与飞智（Flydigi）官方无任何关联，也未获得其授权或认可。“飞智”“Flydigi”及 BS 系列等名称和商标归其各自权利人所有，在本软件中仅用于说明设备兼容性。
+
+2. 本软件按“现状”提供，不附带任何明示或暗示的担保，包括但不限于适销性、特定用途适用性和不侵权的担保。作者不保证本软件没有缺陷、能够不间断运行，或适用于你的设备、固件版本与使用环境。
+
+3. 本软件会直接控制散热器的风扇转速与灯光，并读取电脑的温度、功耗等硬件信息。自定义转速、非官方最低转速、固件维护命令（初始化、恢复出厂设置等）以及标注为实验性的功能，可能导致散热不足、设备工作异常或无法使用、失去厂商保修等后果。请根据设备的实际情况谨慎使用，相关风险由你自行承担。
+
+4. 在 Windows 上，THRM 通过 LibreHardwareMonitor 与 PawnIO 内核驱动读取硬件传感器，安装程序会一并安装 PawnIO（系统中已安装时跳过）。PawnIO 由其作者独立开发和发布，遵循其自身的许可条款。
+
+5. 在适用法律允许的最大范围内，作者及贡献者不对因使用或无法使用本软件而造成的任何直接、间接、附带、特殊或后果性损失承担责任，包括但不限于硬件损坏、数据丢失和业务中断，即使事先已被告知发生此类损失的可能性。
+
+6. 隐私：THRM 不收集、不上传、不出售任何个人数据，配置、日志与温度历史只保存在你的电脑上。打开“关于”页时，程序会访问官网 thrm.tianli0.top（失败时改为访问 GitHub）来检查新版本、读取赞助名单；你选择更新时，从同一来源下载安装包。详见隐私说明：https://github.com/TIANLI0/THRM/blob/main/PRIVACY.md
+
+二、开源许可
+
+THRM 以 MIT 许可证发布，源代码地址：https://github.com/TIANLI0/THRM
+
+许可证原文如下（以英文原文为准）：
+
+MIT License
+
+Copyright (c) 2025 Tianli
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+三、第三方组件
+
+THRM 使用了多个开源组件，它们分别遵循各自的许可证（MIT、BSD-2-Clause、BSD-3-Clause、Apache-2.0、ISC、OFL-1.1 与 MPL-2.0）。其中 LibreHardwareMonitorLib 以 MPL-2.0 授权，本软件以未经修改的二进制形式使用，其源代码可在 https://github.com/LibreHardwareMonitor/LibreHardwareMonitor 获取。完整的组件清单与许可证见软件“关于”页中的开源声明。

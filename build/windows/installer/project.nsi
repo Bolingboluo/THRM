@@ -149,7 +149,9 @@ ManifestDPIAware true
 
 !define MUI_PAGE_CUSTOMFUNCTION_PRE WelcomePagePre
 !insertmacro MUI_PAGE_WELCOME # Welcome to the installer page.
-# !insertmacro MUI_PAGE_LICENSE "resources\eula.txt" # Adds a EULA page to the installer
+# 用户协议：免责声明 + 开源许可。必须勾选同意才能继续；静默安装（/S，应用内更新）不显示任何页面。
+!define MUI_LICENSEPAGE_CHECKBOX
+!insertmacro MUI_PAGE_LICENSE "$(THRM_LICENSE_FILE)"
 !insertmacro MUI_PAGE_DIRECTORY # In which folder install page.
 !insertmacro MUI_PAGE_COMPONENTS # Component selection page
 !insertmacro MUI_PAGE_INSTFILES # Installing page.
@@ -160,6 +162,11 @@ ManifestDPIAware true
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Japanese"
+
+# 用户协议文本由 resources 下的 UTF-8（带 BOM）文件提供，按安装语言选择
+LicenseLangString THRM_LICENSE_FILE ${LANG_SIMPCHINESE} "resources\license_zh-CN.txt"
+LicenseLangString THRM_LICENSE_FILE ${LANG_ENGLISH} "resources\license_en-US.txt"
+LicenseLangString THRM_LICENSE_FILE ${LANG_JAPANESE} "resources\license_ja-JP.txt"
 
 ## The following two statements can be used to sign the installer and the uninstaller. The path to the binaries are provided in %1
 #!uninstfinalize 'signtool --file "%1"'

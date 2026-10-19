@@ -1,16 +1,17 @@
 # Privacy Policy
 
-*中文摘要：THRM 不收集、不上传、不出售任何个人数据。所有配置、日志和温度历史都只保存在你自己的电脑上。程序唯一的网络连接是向 GitHub 检查新版本。*
+*中文摘要：THRM 不收集、不上传、不出售任何个人数据。所有配置、日志和温度历史都只保存在你自己的电脑上。只有打开「关于」页时，程序才会联网：向官网 thrm.tianli0.top（失败时改为 GitHub）检查新版本、读取鸣谢名单，并加载名单里的头像；选择更新时从同一来源下载安装包。*
 
-Last updated: 2026-08-07
+Last updated: 2026-10-20
 
 ## Summary
 
 **THRM does not collect, transmit, or sell any personal data.**
 
 THRM has no analytics, no telemetry, no crash reporting, no advertising identifiers, and no
-user accounts. There is no THRM server. All data the application produces stays on your
-computer.
+user accounts. The official website only relays public release information, downloads and the
+credits list from GitHub; it does not receive any data produced by the application. All data the
+application produces stays on your computer.
 
 ## Data stored on your device
 
@@ -35,17 +36,25 @@ above and is never transmitted.
 
 ## Network connections
 
-THRM makes network requests to exactly one destination:
+THRM connects to the network only while the **About** page is open, and only for the purposes
+below. If you never open the About page, the application makes no network connections.
 
 | Destination | Purpose | Data sent |
 | --- | --- | --- |
-| `github.com` | Check for a newer release, and download the installer if you choose to update | Nothing beyond what any HTTPS request necessarily reveals: your IP address and a standard user agent |
+| `thrm.tianli0.top` (official website) | Check for a newer release, load the credits list, and download the installer if you choose to update | Nothing beyond what any HTTPS request necessarily reveals: your IP address and a standard user agent |
+| `api.github.com`, `github.com`, `raw.githubusercontent.com`, `*.githubusercontent.com` | The same requests, used only when the official website cannot be reached | Same as above |
+| `q1.qlogo.cn`, `avatars.githubusercontent.com` | Display the avatars of sponsors and contributors in the credits list | Same as above |
 
-No identifier, hardware profile, or usage data is attached to this request. Update checking can
-be disabled in the application settings; when disabled, THRM makes no network connections at
-all.
+No identifier, hardware profile, or usage data is attached to any of these requests.
 
-GitHub is an independent service and its handling of that request is governed by the
+The official website is operated by the maintainer. Its server relays the public GitHub release
+information, release downloads and the credits file so that they can be reached from regions
+where GitHub is slow or unavailable. Like any web server it keeps standard access logs (IP
+address, time, requested path and user agent), which are used only to keep the service running
+and are not shared or sold.
+
+GitHub and Tencent (QQ avatars) are independent services, and their handling of these requests is
+governed by their own policies, such as the
 [GitHub Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement).
 
 ## Diagnostic packages
