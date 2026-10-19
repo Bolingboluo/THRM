@@ -26,83 +26,24 @@ bun run build    # 输出 out/
 两个前缀可以在构建时用环境变量改：`NEXT_PUBLIC_RELEASE_API`（默认 `/api/github`）、`NEXT_PUBLIC_DOWNLOAD_BASE`（默认 `/download`）。
 另外建议设置 `NEXT_PUBLIC_SITE_URL=https://你的域名`，用于 Open Graph 分享图的绝对地址。
 
-## nginx 配置
+## 线上部署
 
-```nginx
-# GitHub API 短缓存：所有访客共用服务器出口 IP，不缓存很快会触发限流
-proxy_cache_path /var/cache/nginx/thrm_api levels=1:2 keys_zone=thrm_api:1m max_size=50m inactive=1d use_temp_path=off;
-
-server {
-    listen 443 ssl http2;
-    server_name thrm.example.com;
-    # ssl_certificate ...;
-
-    resolver 1.1.1.1 8.8.8.8 ipv6=off valid=300s;
-    proxy_ssl_server_name on;
-    proxy_http_version 1.1;
-
-    # 静态站点：直接放 out/，或者转发到 Vercel / Cloudflare Pages 等静态托管
-    root /var/www/thrm;
-    location / {
-        try_files $uri $uri/ $uri.html =404;
-    }
-
-    # ① Release 接口（只读，只限本仓库）
-    location /api/github/ {
-        limit_except GET HEAD { deny all; }
-        proxy_pass https://api.github.com/repos/TIANLI0/THRM/;
-        proxy_set_header Host api.github.com;
-        proxy_set_header User-Agent "thrm-website";
-        # 只读 token（fine-grained，无需任何权限）：限额从 60 次/小时提到 5000 次/小时
-        proxy_set_header Authorization "Bearer <GITHUB_TOKEN>";
-        proxy_set_header Accept-Encoding "";
-        proxy_hide_header Set-Cookie;
-
-        proxy_cache thrm_api;
-        proxy_cache_key "$request_uri|$http_accept";
-        proxy_cache_valid 200 60s;
-        proxy_cache_use_stale error timeout updating http_403 http_429 http_500 http_502 http_503;
-        proxy_cache_background_update on;
-        proxy_cache_lock on;
-        add_header X-Cache $upstream_cache_status;
-
-        # 可选：把返回 JSON 里的 GitHub 下载地址换成本站，桌面端检查更新也能直接用这个接口
-        sub_filter_types application/json;
-        sub_filter_once off;
-        sub_filter "https://github.com/TIANLI0/THRM/releases/download/" "https://$host/download/";
-    }
-
-    # ② 最新版下载：GitHub 302 到具体标签，改写成本站地址后交给浏览器
-    location ~ ^/download/latest/(?<file>[^/]+)$ {
-        proxy_pass https://github.com/TIANLI0/THRM/releases/latest/download/$file;
-        proxy_set_header Host github.com;
-        proxy_redirect https://github.com/TIANLI0/THRM/releases/download/ /download/;
-    }
-
-    # ③ 指定版本下载：GitHub 会 302 到带签名的 release-assets 地址，由服务器跟随并转发文件
-    location ~ ^/download/(?<tag>[^/]+)/(?<file>[^/]+)$ {
-        proxy_pass https://github.com/TIANLI0/THRM/releases/download/$tag/$file;
-        proxy_set_header Host github.com;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        error_page 301 302 307 308 = @github_asset;
-    }
-
-    location @github_asset {
-        set $asset_url $upstream_http_location;
-        # 变量形式的 proxy_pass 会自动用目标域名作 Host；客户端的 Range 头默认透传，断点续传可用。
-        # 文件名由 GitHub 返回的 Content-Disposition 带回。
-        proxy_pass $asset_url;
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-        proxy_hide_header Set-Cookie;
-    }
-}
+```
+访客 ──► thrm.tianli0.top（香港服务器 · 宝塔 nginx，只做反代）
+            ├─ /api/github/*        ──► api.github.com/repos/TIANLI0/THRM/*（缓存 120 秒）
+            ├─ /download/latest/*   ──► GitHub latest/download，302 改写回本站
+            ├─ /download/<标签>/*   ──► GitHub releases/download，服务器跟随跳转流式转发
+            └─ 其余页面             ──► thrm.vercel.app（Vercel 项目 thrm）
 ```
 
-说明：
-
-- `/api/github/` 缓存 60 秒，访客看到的最新版本最多晚 1 分钟。想立即生效，删掉 `/var/cache/nginx/thrm_api` 里的文件即可。
-- `sub_filter` 那段是可选的。启用后，`https://你的域名/api/github/releases/latest` 就是一个可以直接给桌面端用的更新接口：
-  把 `frontend/src/app/lib/brand.ts` 里的 `latestReleaseApiUrl` / `releasesApiUrl` 换成这个地址，字段结构不变，下载地址已经是本站。
-- 下载文件由服务器流式转发、不落盘。下载量大的话，可以在 ③ 上再加 `slice` + `proxy_cache` 分片缓存。
+- **Vercel**：项目 `thrm`（团队 Tianli's projects），已连接 `TIANLI0/THRM`，Root Directory 为 `website`，
+  生产分支 `main`。改网页后 push 到 main 即自动构建上线；`vercel.json` 的 `ignoreCommand`
+  让只改动 App 代码的提交跳过网站构建。环境变量 `NEXT_PUBLIC_SITE_URL=https://thrm.tianli0.top`。
+- **服务器**：宝塔站点 `thrm.tianli0.top`，Let's Encrypt 证书由宝塔计划任务自动续签。反代规则写在站点的
+  「伪静态」里（`/www/server/panel/vhost/rewrite/thrm.tianli0.top.conf`），仓库里的副本是
+  [`deploy/nginx-thrm.tianli0.top.conf`](deploy/nginx-thrm.tianli0.top.conf)，改规则时两边一起改。
+  规则全部用 `^~` 前缀匹配，是为了避开宝塔站点配置里默认的 `.js/.css`/图片正则（`.*\.(js|css)?$` 连 `.exe` 都会匹配）。
+- `/api/github/` 未带 GitHub token，靠 120 秒缓存把请求压在每小时 60 次的匿名额度内；限流或出错时继续返回旧数据。
+  需要更实时的话，在规则里加一行 `proxy_set_header Authorization "Bearer <只读 token>";`，再把缓存时间调短。
+- 规则里的 `sub_filter` 会把接口 JSON 里的 GitHub 下载地址换成本站，所以 `https://thrm.tianli0.top/api/github/releases/latest`
+  可以直接给桌面端当更新接口用（把 `frontend/src/app/lib/brand.ts` 里的 `latestReleaseApiUrl` / `releasesApiUrl` 换掉即可，字段结构不变）。
