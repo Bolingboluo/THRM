@@ -205,6 +205,12 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 			runtime.EventsEmit(a.ctx, "timeline-event", timelineEvent)
 		}
 
+	case ipc.EventFirmwareUpdate:
+		// 固件刷写进度/日志/完成，原样转发给前端。
+		if len(event.Data) > 0 {
+			runtime.EventsEmit(a.ctx, "firmware-update", event.Data)
+		}
+
 	case ipc.EventDeviceConnected:
 		// 载荷里除了字符串字段还嵌着 deviceSettings 对象，按 map[string]string 解码
 		// 会整体失败，前端每次连接都拿不到设备设置。

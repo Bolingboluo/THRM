@@ -64,6 +64,7 @@ type DecodedFrame struct {
 	Summary                  string         `json:"summary,omitempty"`
 	FirmwareVersion          string         `json:"firmwareVersion,omitempty"`
 	FirmwareVersionRaw       string         `json:"firmwareVersionRaw,omitempty"`
+	ThrmFirmwareVersion      int            `json:"thrmFirmwareVersion,omitempty"` // THRM 定制固件版本（0x01 响应第 5 字节，0=原厂）
 	DeviceIdentifier         string         `json:"deviceIdentifier,omitempty"`
 	IdentityMarker           string         `json:"identityMarker,omitempty"`
 	IdentityHex              string         `json:"identityHex,omitempty"`
@@ -363,7 +364,13 @@ func DecodeFrame(frame Frame) DecodedFrame {
 			return DecodedFrame{Type: "firmwareVersion", Summary: "firmware version: incomplete payload", Confidence: "high"}
 		}
 		version := fmt.Sprintf("%d.%d.%d.%d", payload[0], payload[1], payload[2], payload[3])
-		return DecodedFrame{Type: "firmwareVersion", Summary: "firmware version: " + version, FirmwareVersion: version, FirmwareVersionRaw: Hex(payload[:4]), Confidence: "high"}
+		df := DecodedFrame{Type: "firmwareVersion", Summary: "firmware version: " + version, FirmwareVersion: version, FirmwareVersionRaw: Hex(payload[:4]), Confidence: "high"}
+		// THRM 定制固件在 4 字节设备版本后追加 1 字节 THRM 版本（0=原厂）。
+		if len(payload) >= 5 && payload[4] != 0 {
+			df.ThrmFirmwareVersion = int(payload[4])
+			df.Summary = fmt.Sprintf("%s (THRM v%d)", df.Summary, payload[4])
+		}
+		return df
 	case CmdQueryConfigState:
 		if len(payload) < 1 {
 			return DecodedFrame{Type: "configState", Summary: "firmware initialization state: incomplete payload", Confidence: "medium"}

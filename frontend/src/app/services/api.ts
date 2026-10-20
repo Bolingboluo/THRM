@@ -56,6 +56,43 @@ import type {
   ThemeMeta,
 } from '../types/app';
 
+// ===== 固件更新类型 =====
+export interface FirmwareUpdateStatus {
+  supported: boolean;
+  deviceCode: string;
+  modelName: string;
+  normalConnected: boolean;
+  devicePresentIsp: boolean;
+  driverInstalled: boolean;
+  currentVersion: string;
+  thrmVersion: number;
+}
+
+export interface FirmwareInfo {
+  source: string; // official | hosted | local
+  version: string;
+  name: string;
+  info: string;
+  date: string;
+  url: string;
+}
+
+export interface FlashFirmwareParams {
+  source: string;
+  url?: string;
+  localPath?: string;
+  version?: string;
+}
+
+export interface FirmwareFlashEvent {
+  kind: string; // log | progress | done
+  phase?: string; // write | verify
+  done?: number;
+  total?: number;
+  message?: string;
+  success?: boolean;
+}
+
 class ApiService {
   // 设备连接
   async connectDevice(): Promise<boolean> {
@@ -321,6 +358,33 @@ class ApiService {
   async setFlydigiCompat(enabled: boolean): Promise<FlydigiCompatStatus | null> {
     const value = await (window as any).go?.main?.App?.SetFlydigiCompat?.(enabled);
     return (value ?? null) as FlydigiCompatStatus | null;
+  }
+
+  // ===== 固件更新 =====
+  async getFirmwareUpdateStatus(): Promise<FirmwareUpdateStatus> {
+    const v = await (window as any).go?.main?.App?.GetFirmwareUpdateStatus?.();
+    return (v ?? { supported: false }) as FirmwareUpdateStatus;
+  }
+
+  async listFirmwareUpdates(): Promise<FirmwareInfo[]> {
+    const v = await (window as any).go?.main?.App?.ListFirmwareUpdates?.();
+    return (v ?? []) as FirmwareInfo[];
+  }
+
+  async installFirmwareDriver(): Promise<void> {
+    return await (window as any).go?.main?.App?.InstallFirmwareDriver?.();
+  }
+
+  async uninstallFirmwareDriver(): Promise<void> {
+    return await (window as any).go?.main?.App?.UninstallFirmwareDriver?.();
+  }
+
+  async flashFirmware(params: FlashFirmwareParams): Promise<void> {
+    return await (window as any).go?.main?.App?.FlashFirmware?.(params);
+  }
+
+  onFirmwareUpdate(callback: (ev: FirmwareFlashEvent) => void): () => void {
+    return EventsOn('firmware-update', callback);
   }
 
   // 事件监听

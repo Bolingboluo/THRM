@@ -486,6 +486,13 @@ func (a *CoreApp) onSystemSuspend() {
 			return
 		}
 
+		// 断开前按配置关闭风扇与灯效，让设备在睡眠期间不转不亮；唤醒重连后由
+		// reapplyDeviceConfigLocked 自动恢复。
+		a.powerOffDeviceOutputsForSuspend()
+		if !a.isCurrentSuspendGeneration(generation) {
+			return
+		}
+
 		a.safeRun("suspend-device-disconnect", func() {
 			a.deviceManager.DisconnectSilently()
 		})
@@ -519,6 +526,25 @@ func (a *CoreApp) onSystemSuspend() {
 
 func (a *CoreApp) isCurrentSuspendGeneration(generation uint64) bool {
 	return a.systemSuspended.Load() && a.suspendGeneration.Load() == generation && !a.stopping.Load()
+}
+
+// powerOffDeviceOutputsForSuspend 在系统挂起断开设备之前关闭风扇与灯效，让设备在睡眠
+// 期间不转不亮。仅在配置开启且当前仍连接时执行；唤醒重连后 reapplyDeviceConfigLocked 会
+// 按用户配置自动恢复（风扇走修复后的可靠起转路径）。尽力而为，任何失败都不阻塞挂起。
+func (a *CoreApp) powerOffDeviceOutputsForSuspend() {
+	if !a.configManager.Get().SuspendTurnOff {
+		return
+	}
+	if !a.deviceManager.IsConnected() {
+		return
+	}
+	a.logInfo("休眠：按配置关闭风扇与灯效，唤醒后自动恢复")
+	a.safeRun("suspend-fan-off", func() { a.deviceManager.SetCustomFanSpeed(0) })
+	// 灯效与挡位灯仅 BS2/BS2PRO/BS3PRO 支持。
+	if !a.deviceManager.IsBS1() {
+		a.safeRun("suspend-rgb-off", func() { a.deviceManager.SetRGBOff() })
+		a.safeRun("suspend-gearlight-off", func() { a.deviceManager.SetGearLight(false) })
+	}
 }
 
 // onSystemResume 收到系统唤醒通知时调用，触发设备与监控的恢复。

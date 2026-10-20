@@ -72,6 +72,7 @@ export interface AppConfig {
   fanCurveProfiles?: FanCurveProfile[];
   activeFanCurveProfileId?: string;
   gearLight: boolean;          // 挡位灯
+  suspendTurnOff: boolean;     // 系统休眠时关闭风扇与灯效，唤醒后自动恢复
   powerOnStart: boolean;       // 通电自启动
   windowsAutoStart: boolean;   // Windows开机自启动
   // 主题模式：system/light/dark 为内置基础主题；其它字符串为自定义主题 id（如 'thrm'）
@@ -282,6 +283,7 @@ export interface DeviceSettings {
   hidReleaseNumberHex?: string;
   firmwareVersion?: string;
   firmwareVersionRaw?: string;
+  thrmFirmwareVersion?: number; // THRM 定制固件版本（0/缺省=原厂）
   firmwareReadStatus?: 'ready' | 'failed' | 'unsupported';
   firmwareReadError?: string;
   deviceIdentifier?: string;

@@ -293,6 +293,7 @@ type DeviceSettings struct {
 	HIDReleaseNumberHex      string   `json:"hidReleaseNumberHex,omitempty"`
 	FirmwareVersion          string   `json:"firmwareVersion,omitempty"`
 	FirmwareVersionRaw       string   `json:"firmwareVersionRaw,omitempty"`
+	ThrmFirmwareVersion      int      `json:"thrmFirmwareVersion,omitempty"` // THRM 定制固件版本（0=原厂）
 	FirmwareReadStatus       string   `json:"firmwareReadStatus,omitempty"` // ready/failed/unsupported
 	FirmwareReadError        string   `json:"firmwareReadError,omitempty"`
 	DeviceIdentifier         string   `json:"deviceIdentifier,omitempty"`
@@ -807,6 +808,7 @@ type AppConfig struct {
 	FanCurveProfiles                 []FanCurveProfile         `json:"fanCurveProfiles"`                 // 风扇曲线方案列表
 	ActiveFanCurveProfileID          string                    `json:"activeFanCurveProfileId"`          // 当前激活曲线方案ID
 	GearLight                        bool                      `json:"gearLight"`                        // 挡位灯
+	SuspendTurnOff                   bool                      `json:"suspendTurnOff"`                   // 系统休眠时关闭风扇与灯效，唤醒后自动恢复
 	PowerOnStart                     bool                      `json:"powerOnStart"`                     // 通电自启动
 	WindowsAutoStart                 bool                      `json:"windowsAutoStart"`                 // Windows开机自启动
 	DisableSystemTray                bool                      `json:"disableSystemTray"`                // 关闭系统托盘图标(取反语义：旧配置缺字段时默认显示托盘)
@@ -1197,6 +1199,7 @@ func GetDefaultConfig(isAutoStart bool) AppConfig {
 		},
 		ActiveFanCurveProfileID: "default",
 		GearLight:               true,
+		SuspendTurnOff:          false,
 		PowerOnStart:            false,
 		WindowsAutoStart:        false,
 		DisableSystemTray:       false,

@@ -96,6 +96,13 @@ const (
 	ReqSetLightStrip       RequestType = "SetLightStrip"
 	ReqGetSmartLightStatus RequestType = "GetSmartLightStatus"
 
+	// 固件更新
+	ReqGetFirmwareUpdateStatus RequestType = "GetFirmwareUpdateStatus"
+	ReqListFirmwareUpdates     RequestType = "ListFirmwareUpdates"
+	ReqInstallFirmwareDriver   RequestType = "InstallFirmwareDriver"
+	ReqUninstallFirmwareDriver RequestType = "UninstallFirmwareDriver"
+	ReqFlashFirmware           RequestType = "FlashFirmware"
+
 	// 温度相关
 	ReqGetTemperature                      RequestType = "GetTemperature"
 	ReqGetTemperatureHistory               RequestType = "GetTemperatureHistory"
@@ -185,6 +192,7 @@ const (
 	EventHealthPing             = "health-ping"
 	EventHeartbeat              = "heartbeat"
 	EventTimelineEvent          = "timeline-event"
+	EventFirmwareUpdate         = "firmware-update" // 固件刷写进度/日志/完成
 )
 
 // Server IPC 服务器
@@ -1257,6 +1265,14 @@ type SetCustomSpeedParams struct {
 // SetBoolParams 布尔参数
 type SetBoolParams struct {
 	Enabled bool `json:"enabled"`
+}
+
+// FlashFirmwareParams 是 ReqFlashFirmware 的参数。
+type FlashFirmwareParams struct {
+	Source    string `json:"source"`    // official | hosted | local
+	URL       string `json:"url"`       // 官方/托管的下载地址
+	LocalPath string `json:"localPath"` // 本地文件路径
+	Version   string `json:"version"`   // 仅用于展示
 }
 
 // SetStringParams 字符串参数

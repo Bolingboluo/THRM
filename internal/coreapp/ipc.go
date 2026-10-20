@@ -285,6 +285,35 @@ func (a *CoreApp) handleIPCRequest(req ipc.Request) ipc.Response {
 	case ipc.ReqGetSmartLightStatus:
 		return a.dataResponse(a.GetSmartLightStatus())
 
+	// 固件更新
+	case ipc.ReqGetFirmwareUpdateStatus:
+		return a.dataResponse(a.GetFirmwareUpdateStatus())
+	case ipc.ReqListFirmwareUpdates:
+		list, err := a.ListFirmwareUpdates()
+		if err != nil {
+			return a.errorResponse(err.Error())
+		}
+		return a.dataResponse(list)
+	case ipc.ReqInstallFirmwareDriver:
+		if err := a.InstallFirmwareDriver(); err != nil {
+			return a.errorResponse(err.Error())
+		}
+		return a.successResponse(true)
+	case ipc.ReqUninstallFirmwareDriver:
+		if err := a.UninstallFirmwareDriver(); err != nil {
+			return a.errorResponse(err.Error())
+		}
+		return a.successResponse(true)
+	case ipc.ReqFlashFirmware:
+		var params ipc.FlashFirmwareParams
+		if err := json.Unmarshal(req.Data, &params); err != nil {
+			return a.errorResponse("解析固件刷写参数失败: " + err.Error())
+		}
+		if err := a.FlashFirmware(params); err != nil {
+			return a.errorResponse(err.Error())
+		}
+		return a.successResponse(true)
+
 	// 温度相关
 	case ipc.ReqGetTemperature:
 		a.mutex.RLock()

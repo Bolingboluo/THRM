@@ -35,6 +35,7 @@ import {
   ArrowRight,
   RefreshCw,
   ShieldCheck,
+  Moon,
   PanelBottom,
 } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -947,6 +948,17 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   const handleIgnoreDeviceOnReconnectChange = useCallback(async (enabled: boolean) => {
     try {
       const newCfg = types.AppConfig.createFrom({ ...config, ignoreDeviceOnReconnect: enabled });
+      await apiService.updateConfig(newCfg);
+      onConfigChange(newCfg);
+    } catch { /* noop */ }
+  }, [config, onConfigChange]);
+
+  // 当前设备的 THRM 定制固件版本（0=原厂）。休眠关闭输出需要 THRM v1+ 固件。
+  const thrmFwVersion = (deviceSettings as any)?.thrmFirmwareVersion ?? 0;
+
+  const handleSuspendTurnOffChange = useCallback(async (enabled: boolean) => {
+    try {
+      const newCfg = types.AppConfig.createFrom({ ...config, suspendTurnOff: enabled });
       await apiService.updateConfig(newCfg);
       onConfigChange(newCfg);
     } catch { /* noop */ }
@@ -2676,6 +2688,23 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
             <ToggleSwitch
               enabled={(config as any).ignoreDeviceOnReconnect ?? true}
               onChange={handleIgnoreDeviceOnReconnectChange}
+              size="sm"
+              color="green"
+            />
+          </SettingRow>
+
+          <SettingRow
+            icon={<Moon className={clsx('h-4 w-4', (config as any).suspendTurnOff ? 'text-indigo-400' : '')} />}
+            title={t('controlPanel.system.suspendTurnOffTitle')}
+            description={thrmFwVersion < 1
+              ? t('controlPanel.system.suspendTurnOffNeedThrm')
+              : t('controlPanel.system.suspendTurnOffDescription')}
+            tip={t('controlPanel.system.suspendTurnOffTip')}
+          >
+            <ToggleSwitch
+              enabled={thrmFwVersion >= 1 && ((config as any).suspendTurnOff ?? false)}
+              onChange={handleSuspendTurnOffChange}
+              disabled={thrmFwVersion < 1}
               size="sm"
               color="green"
             />

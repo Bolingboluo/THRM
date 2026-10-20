@@ -1098,6 +1098,33 @@ func (m *Manager) setRealtimeFanSpeedLocked(rpm int, name string) bool {
 		return true
 	}
 	wakingFromZero := m.hasCommandedRPM && m.lastCommandedRPM == 0 && rpm > 0
+	// freshStart：连接/重置后的第一条转速命令。休眠关输出会把风扇停成 0，断连又清掉
+	// hasCommandedRPM，于是唤醒重连后的首条正转目标不会命中 wakingFromZero；此时风扇
+	// 可能仍停转，需要兜底校验在带不起来时走可靠起转。
+	freshStart := !m.hasCommandedRPM
+
+	// 0→有转速的唤醒直接走挡位起转路径（0x08 固定挡位），复用固件连接自启动所用的
+	// 同一条可靠电机起转逻辑：先退出实时并选一次固定挡位，把停死的转子实实在在带起来，
+	// 再回到实时并落到精确目标。只补发一次实时脉冲常常带不动已经停死的转子——这正是
+	// 过去偶发“唤不醒、要重新上电”的根因，所以把挡位起转从 3 秒后的兜底提前到每次
+	// 唤醒都先做，确保唤醒必定成功。
+	if wakingFromZero {
+		if err := m.recoverRealtimeWakeLocked(rpm); err != nil {
+			m.realtimeMode = false
+			m.noteRealtimeWriteResultLocked(false)
+			m.logError("唤醒风扇起转失败: %v", err)
+			return false
+		}
+		m.lastCommandedRPM = rpm
+		m.hasCommandedRPM = true
+		m.realtimeWakeGen++
+		wakeGeneration := m.realtimeWakeGen
+		m.noteRealtimeWriteResultLocked(true)
+		m.logInfo("已通过挡位起转路径唤醒风扇，目标 %d RPM", rpm)
+		// 仍挂一次转速校验兜底：个体差异导致仍未起转时，3 秒后再触发一轮软唤醒。
+		m.scheduleRealtimeWakeVerificationLocked(rpm, wakeGeneration)
+		return true
+	}
 
 	if !m.realtimeMode {
 		if err := m.sendHIDAckLocked(deviceproto.CmdEnterRealtimeRPM, nil, 1, 3); err != nil {
@@ -1106,20 +1133,6 @@ func (m *Manager) setRealtimeFanSpeedLocked(rpm int, name string) bool {
 			return false
 		}
 		m.realtimeMode = true
-	}
-
-	// A stopped rotor can fail to start when the curve asks for a low target such
-	// as 1000 RPM. Keep the realtime session alive at zero, then use the factory
-	// quiet-gear RPM as a short start pulse before settling at the exact curve
-	// target. This preserves true 0 RPM and does not rewrite any gear/RGB setting.
-	if wakingFromZero && rpm < realtimeWakeKickRPM {
-		if err := m.sendRealtimeTargetLocked(realtimeWakeKickRPM); err != nil {
-			m.realtimeMode = false
-			m.noteRealtimeWriteResultLocked(false)
-			m.logError("发送风扇唤醒脉冲失败: %v", err)
-			return false
-		}
-		time.Sleep(realtimeWakeKickDuration)
 	}
 	if err := m.sendRealtimeTargetLocked(rpm); err != nil {
 		// The target write leaves the hardware state unknown. Force a full mode
@@ -1141,9 +1154,11 @@ func (m *Manager) setRealtimeFanSpeedLocked(rpm int, name string) bool {
 		m.logDebug("已设置真正的 0 RPM，并保持实时控制会话以便后续唤醒")
 	} else {
 		m.logDebug("已设置%s: %d RPM", name, rpm)
-	}
-	if wakingFromZero {
-		m.scheduleRealtimeWakeVerificationLocked(rpm, wakeGeneration)
+		if freshStart {
+			// 连接后首条正转目标：风扇可能因休眠关输出等原因仍停转。挂一次转速校验兜底，
+			// 3 秒后若仍为 0 再走可靠起转。只在首条命令挂，避免控温环每个 tick 都起协程。
+			m.scheduleRealtimeWakeVerificationLocked(rpm, wakeGeneration)
+		}
 	}
 	return true
 }

@@ -42,6 +42,10 @@ export function ExportFanCurveProfiles() {
   return window['go']['main']['App']['ExportFanCurveProfiles']();
 }
 
+export function FlashFirmware(arg1) {
+  return window['go']['main']['App']['FlashFirmware'](arg1);
+}
+
 export function GetAppVersion() {
   return window['go']['main']['App']['GetAppVersion']();
 }
@@ -90,6 +94,10 @@ export function GetFanCurveProfiles() {
   return window['go']['main']['App']['GetFanCurveProfiles']();
 }
 
+export function GetFirmwareUpdateStatus() {
+  return window['go']['main']['App']['GetFirmwareUpdateStatus']();
+}
+
 export function GetFlydigiCompatStatus() {
   return window['go']['main']['App']['GetFlydigiCompatStatus']();
 }
@@ -126,12 +134,20 @@ export function InitSystemTray() {
   return window['go']['main']['App']['InitSystemTray']();
 }
 
+export function InstallFirmwareDriver() {
+  return window['go']['main']['App']['InstallFirmwareDriver']();
+}
+
 export function IsAutoStartLaunch() {
   return window['go']['main']['App']['IsAutoStartLaunch']();
 }
 
 export function IsRunningAsAdmin() {
   return window['go']['main']['App']['IsRunningAsAdmin']();
+}
+
+export function ListFirmwareUpdates() {
+  return window['go']['main']['App']['ListFirmwareUpdates']();
 }
 
 export function ListThemes() {
@@ -196,6 +212,10 @@ export function SaveCoolingBenefitReport(arg1) {
 
 export function SaveFanCurveProfile(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SaveFanCurveProfile'](arg1, arg2, arg3, arg4);
+}
+
+export function SelectFirmwareFile() {
+  return window['go']['main']['App']['SelectFirmwareFile']();
 }
 
 export function SendDeviceDebugCommand(arg1, arg2) {
@@ -292,6 +312,10 @@ export function TestBridgeProgram() {
 
 export function TestTemperatureReading() {
   return window['go']['main']['App']['TestTemperatureReading']();
+}
+
+export function UninstallFirmwareDriver() {
+  return window['go']['main']['App']['UninstallFirmwareDriver']();
 }
 
 export function UpdateConfig(arg1) {

@@ -320,6 +320,7 @@ func applyDecodedDeviceSetting(settings *types.DeviceSettings, decoded devicepro
 	case "firmwareVersion":
 		settings.FirmwareVersion = decoded.FirmwareVersion
 		settings.FirmwareVersionRaw = decoded.FirmwareVersionRaw
+		settings.ThrmFirmwareVersion = decoded.ThrmFirmwareVersion
 	case "deviceIdentifier":
 		settings.DeviceIdentifier = decoded.DeviceIdentifier
 	case "identityBlock":

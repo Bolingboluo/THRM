@@ -31,8 +31,61 @@ export namespace flydigicompat {
 
 }
 
+export namespace fwupdate {
+	
+	export class FirmwareInfo {
+	    source: string;
+	    version: string;
+	    name: string;
+	    info: string;
+	    date: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FirmwareInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source = source["source"];
+	        this.version = source["version"];
+	        this.name = source["name"];
+	        this.info = source["info"];
+	        this.date = source["date"];
+	        this.url = source["url"];
+	    }
+	}
+
+}
+
 export namespace guiapp {
 	
+	export class FirmwareUpdateStatus {
+	    supported: boolean;
+	    deviceCode: string;
+	    modelName: string;
+	    normalConnected: boolean;
+	    devicePresentIsp: boolean;
+	    driverInstalled: boolean;
+	    currentVersion: string;
+	    thrmVersion: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FirmwareUpdateStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.supported = source["supported"];
+	        this.deviceCode = source["deviceCode"];
+	        this.modelName = source["modelName"];
+	        this.normalConnected = source["normalConnected"];
+	        this.devicePresentIsp = source["devicePresentIsp"];
+	        this.driverInstalled = source["driverInstalled"];
+	        this.currentVersion = source["currentVersion"];
+	        this.thrmVersion = source["thrmVersion"];
+	    }
+	}
 	export class WindowState {
 	    width: number;
 	    height: number;
@@ -58,6 +111,24 @@ export namespace guiapp {
 
 export namespace ipc {
 	
+	export class FlashFirmwareParams {
+	    source: string;
+	    url: string;
+	    localPath: string;
+	    version: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FlashFirmwareParams(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source = source["source"];
+	        this.url = source["url"];
+	        this.localPath = source["localPath"];
+	        this.version = source["version"];
+	    }
+	}
 	export class SaveCoolingBenefitReportParams {
 	    deviceModel: string;
 	    cpuModel: string;
@@ -748,6 +819,7 @@ export namespace types {
 	    fanCurveProfiles: FanCurveProfile[];
 	    activeFanCurveProfileId: string;
 	    gearLight: boolean;
+	    suspendTurnOff: boolean;
 	    powerOnStart: boolean;
 	    windowsAutoStart: boolean;
 	    disableSystemTray: boolean;
@@ -799,6 +871,7 @@ export namespace types {
 	        this.fanCurveProfiles = this.convertValues(source["fanCurveProfiles"], FanCurveProfile);
 	        this.activeFanCurveProfileId = source["activeFanCurveProfileId"];
 	        this.gearLight = source["gearLight"];
+	        this.suspendTurnOff = source["suspendTurnOff"];
 	        this.powerOnStart = source["powerOnStart"];
 	        this.windowsAutoStart = source["windowsAutoStart"];
 	        this.disableSystemTray = source["disableSystemTray"];
@@ -1163,6 +1236,7 @@ export namespace types {
 	    hidReleaseNumberHex?: string;
 	    firmwareVersion?: string;
 	    firmwareVersionRaw?: string;
+	    thrmFirmwareVersion?: number;
 	    firmwareReadStatus?: string;
 	    firmwareReadError?: string;
 	    deviceIdentifier?: string;
@@ -1208,6 +1282,7 @@ export namespace types {
 	        this.hidReleaseNumberHex = source["hidReleaseNumberHex"];
 	        this.firmwareVersion = source["firmwareVersion"];
 	        this.firmwareVersionRaw = source["firmwareVersionRaw"];
+	        this.thrmFirmwareVersion = source["thrmFirmwareVersion"];
 	        this.firmwareReadStatus = source["firmwareReadStatus"];
 	        this.firmwareReadError = source["firmwareReadError"];
 	        this.deviceIdentifier = source["deviceIdentifier"];
