@@ -143,8 +143,7 @@ func (b *BLEManager) Connect() (bool, map[string]string) {
 
 	// 扫描 BS1 设备
 	b.logInfo("开始扫描 BS1 BLE 设备...")
-	var targetAddress bluetooth.Address
-	var targetName string
+	matcher := newBS1ScanMatcher(b.deviceAddress, time.Now())
 	found := make(chan bool, 1)
 	timedOut := atomic.Bool{}
 	scanTimeout := b.scanTimeout
@@ -160,27 +159,30 @@ func (b *BLEManager) Connect() (bool, map[string]string) {
 
 	err := b.adapter.Scan(func(_ *bluetooth.Adapter, result bluetooth.ScanResult) {
 		name := result.LocalName()
-		if strings.Contains(name, "BS1") || strings.Contains(name, "Flydigi") {
-			b.logInfo("发现 BLE 设备: %s (%s)", name, result.Address.String())
-			if strings.Contains(name, "BS1") {
-				targetAddress = result.Address
-				targetName = name
-				select {
-				case found <- true:
-				default:
-				}
-				if stopErr := b.adapter.StopScan(); stopErr != nil {
-					b.logError("找到 BS1 后停止 BLE 扫描失败: %v", stopErr)
-				}
+		hasService := result.HasServiceUUID(bs1ServiceUUID)
+		if !strings.Contains(name, "BS1") && !strings.Contains(name, "Flydigi") && !(name == "" && hasService) {
+			return
+		}
+		match, firstSeen := matcher.offer(result.Address, name, hasService, time.Now())
+		if firstSeen {
+			displayName := name
+			if displayName == "" {
+				displayName = "(无名称, 服务 0xFFF0)"
+			}
+			b.logInfo("发现 BLE 设备: %s (%s)", displayName, result.Address.String())
+		}
+		if match {
+			select {
+			case found <- true:
+			default:
+			}
+			if stopErr := b.adapter.StopScan(); stopErr != nil {
+				b.logError("找到 BS1 后停止 BLE 扫描失败: %v", stopErr)
 			}
 		}
 	})
 	timeout.Stop()
-	if err != nil {
-		if timedOut.Load() {
-			b.logError("BLE 扫描超时，未找到 BS1 设备")
-			return false, nil
-		}
+	if err != nil && !timedOut.Load() {
 		b.logError("BLE 扫描失败: %v", err)
 		return false, nil
 	}
@@ -189,11 +191,18 @@ func (b *BLEManager) Connect() (bool, map[string]string) {
 	// already decided whether a target was found; never wait a second time here.
 	select {
 	case <-found:
-		b.logInfo("已找到 BS1 设备: %s (%s)", targetName, targetAddress.String())
 	default:
-		b.logError("扫描超时，未找到 BS1 设备")
-		return false, nil
+		// 超时前只见过无名称的 0xFFF0 广播，也按它连接，好过整轮扫描白跑。
+		if !matcher.acceptFallback() {
+			b.logError("扫描超时，未找到 BS1 设备")
+			return false, nil
+		}
 	}
+	targetAddress, targetName, byService := matcher.target()
+	if byService {
+		b.logInfo("广播未带设备名，按服务 UUID 0xFFF0 匹配到 BS1: %s", targetAddress.String())
+	}
+	b.logInfo("已找到 BS1 设备: %s (%s)", targetName, targetAddress.String())
 
 	// 连接设备
 	b.logInfo("正在连接 BS1 设备...")
@@ -232,6 +241,89 @@ func (b *BLEManager) Connect() (bool, map[string]string) {
 
 	b.logInfo("BS1 设备连接成功: %s", targetName)
 	return true, info
+}
+
+// bs1ServiceFallbackDelay 是只凭服务 UUID 认设备前，先等带名字广播的时间。
+const bs1ServiceFallbackDelay = 3 * time.Second
+
+// bs1ScanMatcher 从扫描结果里挑出 BS1（issue #46）。
+//
+// BS1 只在刚上电、刚断开的短窗口里在广播中带 "Flydigi BS1" 的名字，其余时间只广播
+// 服务 UUID 0xFFF0——官方软件就是按这个 UUID 认设备的。只认名字的话，散热器先开、
+// 电脑后开时 THRM 一整天都扫不到它。
+//
+// 但 0xFFF0 是很多廉价 BLE 设备共用的自定义服务，所以 UUID 只作后备：
+//   - 名字含 "BS1" 的广播立即采用；
+//   - 带了别的名字的广播一律不算，那显然不是 BS1；
+//   - 无名称的 0xFFF0 广播先记为候选。地址是本次运行连过的 BS1 就立即采用，
+//     否则等满 bs1ServiceFallbackDelay 仍没有带名字的广播，或扫描超时，再用它。
+type bs1ScanMatcher struct {
+	mu           sync.Mutex
+	knownAddress string
+	start        time.Time
+	seen         map[string]bool
+
+	address   bluetooth.Address
+	name      string
+	byService bool
+	matched   bool
+
+	candidate    bluetooth.Address
+	hasCandidate bool
+}
+
+func newBS1ScanMatcher(knownAddress string, start time.Time) *bs1ScanMatcher {
+	return &bs1ScanMatcher{knownAddress: knownAddress, start: start, seen: map[string]bool{}}
+}
+
+// offer 评估一条扫描结果。match 表示已认定目标、可以停止扫描；firstSeen 表示这是
+// 本轮第一次见到该地址，供调用方决定是否记日志（广播每秒会来好几次）。
+func (m *bs1ScanMatcher) offer(address bluetooth.Address, name string, hasService bool, now time.Time) (match, firstSeen bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := address.String()
+	firstSeen = !m.seen[key]
+	m.seen[key] = true
+
+	if m.matched {
+		return false, firstSeen
+	}
+	if strings.Contains(name, "BS1") {
+		m.address, m.name, m.byService, m.matched = address, name, false, true
+		return true, firstSeen
+	}
+	if name != "" || !hasService {
+		return false, firstSeen
+	}
+	if !m.hasCandidate {
+		m.candidate, m.hasCandidate = address, true
+	}
+	if key == m.knownAddress || now.Sub(m.start) >= bs1ServiceFallbackDelay {
+		m.address, m.name, m.byService, m.matched = address, "Flydigi BS1", true, true
+		return true, firstSeen
+	}
+	return false, firstSeen
+}
+
+// acceptFallback 在扫描超时后采用最早记下的无名称 0xFFF0 候选。
+func (m *bs1ScanMatcher) acceptFallback() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.matched {
+		return true
+	}
+	if !m.hasCandidate {
+		return false
+	}
+	m.address, m.name, m.byService, m.matched = m.candidate, "Flydigi BS1", true, true
+	return true
+}
+
+func (m *bs1ScanMatcher) target() (bluetooth.Address, string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.address, m.name, m.byService
 }
 
 // BS1 BLE 服务和特征值 UUID
