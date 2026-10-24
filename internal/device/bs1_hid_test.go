@@ -3,6 +3,8 @@ package device
 import (
 	"bytes"
 	"testing"
+
+	"github.com/TIANLI0/THRM/internal/deviceproto"
 )
 
 // buildBS1HIDReport 的期望布局来自真机验证的 BS1 报文：
@@ -89,5 +91,107 @@ func TestBuildBS1HIDReportDoesNotMutateInput(t *testing.T) {
 
 	if !bytes.Equal(frame, original) {
 		t.Errorf("输入帧被改写：% X → % X", original, frame)
+	}
+}
+
+// makeBS1HIDInputReport 把一帧协议数据包成设备发上来的 HID 报文
+// （首字节是 Input Report ID 0x03），用于喂给读循环的回调。
+func makeBS1HIDInputReport(frame []byte) []byte {
+	report := make([]byte, bs1HIDReadBufferSize)
+	report[0] = bs1HIDInputReportID
+	copy(report[1:], frame)
+	return report[:1+len(frame)]
+}
+
+// HID 路径的 0xEF 状态帧必须解析成 FanData。
+//
+// 字节取自真机抓包：模式 0x02（挡位模式）、实测与目标转速都是 2100 RPM。
+// 这验证了 BS1 走 HID 时读循环的解析与 BLE 通知走的是同一套逻辑。
+func TestHandleHIDFrameParsesStatusNotification(t *testing.T) {
+	b := NewBLEManager(nil)
+
+	frame := deviceproto.BuildFrame(deviceproto.CmdStatusNotify,
+		0x32,       // 挡位/模式字节
+		0x02,       // 工作模式
+		0x01,       // 保留
+		0x34, 0x08, // 实测 2100 RPM（小端）
+		0x34, 0x08, // 目标 2100 RPM（小端）
+		0x4D, 0x16, // 帧序号
+	)
+	b.handleHIDFrame(makeBS1HIDInputReport(frame))
+
+	data := b.GetCurrentFanData()
+	if data == nil {
+		t.Fatalf("0xEF 状态帧未被解析成 FanData")
+	}
+	if data.CurrentRPM != 2100 {
+		t.Errorf("CurrentRPM = %d，期望 2100", data.CurrentRPM)
+	}
+	if data.TargetRPM != 2100 {
+		t.Errorf("TargetRPM = %d，期望 2100", data.TargetRPM)
+	}
+	if data.CurrentMode != 0x02 {
+		t.Errorf("CurrentMode = 0x%02X，期望 0x02", data.CurrentMode)
+	}
+}
+
+// 命令应答必须派发给对应的等待者——这是 sendBLECommandAndWait 能工作的前提，
+// 换传输后同样成立。
+func TestHandleHIDFrameDeliversCommandResponse(t *testing.T) {
+	b := NewBLEManager(nil)
+
+	waiter := b.responses.register(deviceproto.CmdQueryGearRPMTable)
+
+	// 0x27 应答：四个硬件挡位槽的转速，各 2 字节小端。
+	frame := deviceproto.BuildFrame(deviceproto.CmdQueryGearRPMTable,
+		0x14, 0x05, // 1300
+		0xA4, 0x08, // 2212
+		0xF0, 0x0A, // 2800
+		0xDC, 0x0D, // 3548
+	)
+	b.handleHIDFrame(makeBS1HIDInputReport(frame))
+
+	select {
+	case got := <-waiter.result:
+		if got.Command != deviceproto.CmdQueryGearRPMTable {
+			t.Errorf("派发的命令 = 0x%02X，期望 0x%02X", got.Command, deviceproto.CmdQueryGearRPMTable)
+		}
+		if !got.ChecksumOK {
+			t.Errorf("派发的帧校验和不通过")
+		}
+	default:
+		t.Fatalf("应答未派发给等待者")
+	}
+}
+
+// 校验和错误的帧必须被丢弃，不能污染状态或误派发。
+func TestHandleHIDFrameIgnoresBadChecksum(t *testing.T) {
+	b := NewBLEManager(nil)
+
+	frame := deviceproto.BuildFrame(deviceproto.CmdStatusNotify,
+		0x32, 0x02, 0x01, 0x34, 0x08, 0x34, 0x08, 0x4D, 0x16)
+	frame[len(frame)-1] ^= 0xFF // 破坏校验和
+
+	waiter := b.responses.register(deviceproto.CmdStatusNotify)
+	b.handleHIDFrame(makeBS1HIDInputReport(frame))
+
+	if data := b.GetCurrentFanData(); data != nil {
+		t.Errorf("校验和错误的帧污染了状态：CurrentRPM = %d", data.CurrentRPM)
+	}
+	select {
+	case <-waiter.result:
+		t.Errorf("校验和错误的帧被误派发")
+	default:
+	}
+}
+
+// 非协议数据（比如设备刚上电时的杂散报文）不能让读循环崩掉。
+func TestHandleHIDFrameToleratesNonProtocolData(t *testing.T) {
+	b := NewBLEManager(nil)
+
+	b.handleHIDFrame([]byte{0x03, 0xFF, 0x00, 0x11})
+
+	if data := b.GetCurrentFanData(); data != nil {
+		t.Errorf("非协议数据产生了 FanData")
 	}
 }
