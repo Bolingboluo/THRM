@@ -46,6 +46,14 @@ type BLEManager struct {
 	// writeFrame 下发一帧原始数据，nil 时走 GATT 写入特征值。
 	// 模式切换的正确性没有硬件就无法验证，测试注入替身来观察实际发出的命令序列。
 	writeFrame func(cmd []byte) error
+
+	// hidTransport 非 nil 时表示当前连接走 USB HID 而不是 BLE。
+	//
+	// BS1 插 USB 线时优先走 HID：插线即用、不用配对、不受蓝牙适配器影响，
+	// 官方 App 在插线时走的也是这条路（其连接方式选择逻辑先判 HID、再退 BLE）。
+	// 两种传输共用本类型之上的全部 BS1 功能逻辑——命令集、应答等待、
+	// 0xEF 状态解析、调试记录——只有"怎么收发一帧"这一层不同。
+	hidTransport *bs1HIDTransport
 }
 
 const defaultBLEScanTimeout = 10 * time.Second
@@ -241,6 +249,110 @@ func (b *BLEManager) Connect() (bool, map[string]string) {
 
 	b.logInfo("BS1 设备连接成功: %s", targetName)
 	return true, info
+}
+
+// ConnectHID 尝试通过 USB HID 连接 BS1。只试 HID，不做 BLE 扫描。
+//
+// 与 Connect 分开是有意的：Manager.connect 在 BS2/BS3 系列 HID 尝试失败后、
+// BLE 扫描之前调用本方法。必须排在那之前，因为 shouldSkipBLEFallback 在
+// "上次连的是 HID 设备"时会直接跳过整个 BLE 分支——先连过 BS2 的用户插上
+// BS1 就永远连不上了。
+func (b *BLEManager) ConnectHID() (bool, map[string]string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	if b.isConnected {
+		return true, nil
+	}
+
+	path, productName, ok := enumerateBS1HID()
+	if !ok {
+		return false, nil
+	}
+
+	transport, err := newBS1HIDTransport(path)
+	if err != nil {
+		b.logError("打开 BS1 USB HID 接口失败: %v", err)
+		return false, nil
+	}
+
+	b.hidTransport = transport
+	b.isConnected = true
+	b.realtimeMode = false
+	b.stopChan = make(chan struct{})
+
+	// 读循环独占句柄；它非正常退出即代表设备掉线，走统一的断连处理。
+	go func() {
+		if runErr := transport.Run(b.handleHIDFrame); runErr != nil {
+			b.logError("BS1 USB HID 读循环结束: %v", runErr)
+			b.handleDisconnect()
+		}
+	}()
+
+	name := productName
+	if name == "" {
+		name = types.BS1DeviceName
+	}
+	b.logInfo("BS1 已通过 USB HID 连接: %s", name)
+
+	return true, map[string]string{
+		"manufacturer": "Flydigi",
+		"product":      name,
+		"serial":       "",
+		"model":        "BS1",
+		"productId":    fmt.Sprintf("0x%04X", bs1HIDProductID),
+	}
+}
+
+// handleHIDFrame 处理来自 BS1 HID 读循环的一帧原始报文。
+//
+// 与 enableNotifications 里 BLE 通知回调做的事完全相同：先记调试帧，再把
+// 应答派发给等待该命令的调用方，最后尝试按 0xEF 状态帧解析。两个传输因此
+// 共用同一套应答与状态逻辑。
+func (b *BLEManager) handleHIDFrame(raw []byte) {
+	// 传输标签沿用 DeviceTypeBLE：BS1 的 deviceType 就是它，调试面板里
+	// 两边保持一致，避免同一台设备在不同传输下显示成两种类型。
+	b.recordDebugFrame("rx", types.DeviceTypeBLE, raw)
+
+	if frame, ok := deviceproto.ParseFrame(raw); ok && frame.ChecksumOK {
+		b.responses.deliver(frame)
+	}
+
+	fanData := b.parseBS1Notification(raw)
+	if fanData == nil {
+		return
+	}
+
+	b.mutex.Lock()
+	b.currentFanData = fanData
+	b.mutex.Unlock()
+
+	if b.onFanDataUpdate != nil {
+		b.onFanDataUpdate(fanData)
+	}
+}
+
+// detachHIDTransport 原子地取出并清空 HID 传输，同时复位连接状态。
+// 返回 nil 表示当前连接不是 HID（应走原来的 BLE 断开路径）。
+func (b *BLEManager) detachHIDTransport() *bs1HIDTransport {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	transport := b.hidTransport
+	if transport == nil {
+		return nil
+	}
+
+	b.hidTransport = nil
+	b.isConnected = false
+	b.realtimeMode = false
+
+	select {
+	case <-b.stopChan:
+	default:
+		close(b.stopChan)
+	}
+	return transport
 }
 
 // bs1ServiceFallbackDelay 是只凭服务 UUID 认设备前，先等带名字广播的时间。
@@ -544,20 +656,27 @@ func (b *BLEManager) heartbeatLoop() {
 	}
 }
 
-// WriteCommand 通过 BLE 发送命令
+// WriteCommand 下发一帧命令。
+//
+// BLE 与 USB HID 共用这一个出口：具体走哪条传输由 hidTransport 是否为空决定。
+// 上层的全部 BS1 命令都经过这里，所以换传输不需要改任何命令逻辑。
 func (b *BLEManager) WriteCommand(cmd []byte) error {
 	b.mutex.RLock()
 	connected := b.isConnected
+	write := b.writeFrame
+	hidT := b.hidTransport
 	b.mutex.RUnlock()
 
 	if !connected {
-		return fmt.Errorf("BLE 设备未连接")
+		return fmt.Errorf("BS1 设备未连接")
 	}
 
-	b.mutex.RLock()
-	write := b.writeFrame
-	b.mutex.RUnlock()
-	if write == nil {
+	switch {
+	case write != nil:
+		// 测试注入的替身优先，便于观察实际发出的命令序列
+	case hidT != nil:
+		write = hidT.Write
+	default:
 		write = b.writeGATT
 	}
 
@@ -582,8 +701,19 @@ func (b *BLEManager) writeGATT(cmd []byte) error {
 	return nil
 }
 
-// Disconnect 断开 BLE 连接
+// Disconnect 断开 BS1 连接（BLE 或 USB HID）
 func (b *BLEManager) Disconnect() {
+	// HID 传输的断开路径与 BLE 不同：句柄由读循环拥有，只能请求停止并等它
+	// 自己关闭；在这里直接 Close 会触发 hidapi 的 use-after-free。因此先单独
+	// 处理，不进入下面的 BLE 逻辑。
+	if transport := b.detachHIDTransport(); transport != nil {
+		if !transport.Close(bs1HIDCloseTimeout) {
+			b.logError("BS1 HID 读循环未在超时内退出，句柄将由读循环自行关闭")
+		}
+		b.logInfo("BS1 USB HID 连接已断开")
+		return
+	}
+
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
@@ -619,6 +749,8 @@ func (b *BLEManager) handleDisconnect() {
 	wasConnected := b.isConnected
 	b.isConnected = false
 	b.realtimeMode = false
+	// 读循环已经退出，句柄已由它自己关闭；清掉引用避免 Disconnect 再等一次。
+	b.hidTransport = nil
 	b.mutex.Unlock()
 
 	if wasConnected {
