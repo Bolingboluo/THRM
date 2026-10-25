@@ -747,6 +747,9 @@ func (b *BLEManager) Disconnect() {
 func (b *BLEManager) handleDisconnect() {
 	b.mutex.Lock()
 	wasConnected := b.isConnected
+	// 先记下断开时走的是哪条传输：下面会把 hidTransport 清空，
+	// 之后再判断就只能一律当成 BLE 了。
+	wasHID := b.hidTransport != nil
 	b.isConnected = false
 	b.realtimeMode = false
 	// 读循环已经退出，句柄已由它自己关闭；清掉引用避免 Disconnect 再等一次。
@@ -759,7 +762,11 @@ func (b *BLEManager) handleDisconnect() {
 		default:
 			close(b.stopChan)
 		}
-		b.logInfo("BS1 BLE 连接已断开")
+		if wasHID {
+			b.logInfo("BS1 USB HID 连接已断开")
+		} else {
+			b.logInfo("BS1 BLE 连接已断开")
+		}
 		if b.onDisconnect != nil {
 			b.onDisconnect()
 		}
