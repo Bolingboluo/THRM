@@ -215,3 +215,35 @@ func TestConnectHIDResetsUnresponsiveFlagOnEachAttempt(t *testing.T) {
 		t.Fatal("本次尝试没有设备，上一次的「无响应」结论必须被清掉")
 	}
 }
+
+// 读循环关掉句柄后的写入必须直接报错，不能落到已释放的原生句柄上。
+func TestBS1HIDTransportWriteAfterCloseFails(t *testing.T) {
+	transport := &bs1HIDTransport{closed: true}
+
+	frame := deviceproto.BuildFrame(deviceproto.CmdRGBStatus)
+	if err := transport.Write(frame); err == nil {
+		t.Fatal("句柄关闭后 Write 应返回错误")
+	}
+}
+
+// 旧读循环晚退出时不能拆掉已经换上的新连接。
+func TestHandleHIDTransportLostIgnoresStaleTransport(t *testing.T) {
+	b := NewBLEManager(nil)
+	disconnects := 0
+	b.SetCallbacks(nil, func() { disconnects++ })
+
+	current := &bs1HIDTransport{stop: make(chan struct{})}
+	stale := &bs1HIDTransport{stop: make(chan struct{})}
+	b.hidTransport = current
+	b.isConnected = true
+
+	b.handleHIDTransportLost(stale)
+	if !b.IsConnected() || disconnects != 0 {
+		t.Fatalf("旧传输退出拆掉了当前连接：connected=%v, 回调 %d 次", b.IsConnected(), disconnects)
+	}
+
+	b.handleHIDTransportLost(current)
+	if b.IsConnected() || disconnects != 1 {
+		t.Fatalf("当前传输退出后应断开并回调一次：connected=%v, 回调 %d 次", b.IsConnected(), disconnects)
+	}
+}

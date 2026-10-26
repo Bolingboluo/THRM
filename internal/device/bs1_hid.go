@@ -140,6 +140,12 @@ var enumerateBS1HID = func() (path, productName string, ok bool) {
 type bs1HIDTransport struct {
 	dev *hid.Device
 
+	// ioMu 串行化写入与关闭。go-hid 的 Close 释放原生句柄后不会置空，读循环
+	// 因掉线自行关闭句柄的同时若有一次调速写入，就会写到已释放的句柄上。
+	// 读不需要它：读循环本身就是唯一的关闭方。
+	ioMu   sync.Mutex
+	closed bool
+
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
@@ -188,8 +194,22 @@ func (t *bs1HIDTransport) Write(frame []byte) error {
 	if report == nil {
 		return fmt.Errorf("帧长度 %d 超出 BS1 HID 报文容量", len(frame))
 	}
+
+	t.ioMu.Lock()
+	defer t.ioMu.Unlock()
+	if t.closed {
+		return fmt.Errorf("BS1 HID 句柄已关闭")
+	}
 	_, err := t.dev.Write(report)
 	return err
+}
+
+// closeDevice 关闭句柄，此后的 Write 一律返回错误。只能由读循环调用。
+func (t *bs1HIDTransport) closeDevice() error {
+	t.ioMu.Lock()
+	defer t.ioMu.Unlock()
+	t.closed = true
+	return t.dev.Close()
 }
 
 // Run 是读循环，必须在独立协程里启动。
@@ -205,7 +225,7 @@ func (t *bs1HIDTransport) Run(onFrame func(raw []byte)) (err error) {
 		}
 	}()
 	defer func() {
-		if closeErr := t.dev.Close(); closeErr != nil {
+		if closeErr := t.closeDevice(); closeErr != nil {
 			// 关闭失败不影响返回值判定，只记录在 err 里（若尚未有错误）。
 			if err == nil {
 				err = fmt.Errorf("关闭 BS1 HID 句柄失败: %w", closeErr)
@@ -261,12 +281,17 @@ func (t *bs1HIDTransport) checkIdle(lastFrameAt time.Time) error {
 	return fmt.Errorf("BS1 HID 已 %v 未收到任何数据，设备可能已停止响应", bs1HIDIdleTimeout)
 }
 
+// requestStop 请求读循环停止，不等待它退出。
+func (t *bs1HIDTransport) requestStop() {
+	t.stopOnce.Do(func() { close(t.stop) })
+}
+
 // Close 请求读循环停止，并等待它退出（句柄由读循环自己关闭）。
 //
 // 返回 false 表示超时未退出——此时句柄仍归读循环所有，不能强行关闭，
 // 否则会触发 use-after-free。调用方应记录日志并放弃这次连接。
 func (t *bs1HIDTransport) Close(timeout time.Duration) bool {
-	t.stopOnce.Do(func() { close(t.stop) })
+	t.requestStop()
 	select {
 	case <-t.done:
 		return true

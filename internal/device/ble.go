@@ -299,7 +299,7 @@ func (b *BLEManager) ConnectHID() (bool, map[string]string) {
 	go func() {
 		if runErr := transport.Run(b.handleHIDFrame); runErr != nil {
 			b.logError("BS1 USB HID 读循环结束: %v", runErr)
-			b.handleDisconnect()
+			b.handleHIDTransportLost(transport)
 		}
 	}()
 
@@ -372,20 +372,10 @@ func (b *BLEManager) detachHIDTransport() *bs1HIDTransport {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	transport := b.hidTransport
-	if transport == nil {
+	if b.hidTransport == nil {
 		return nil
 	}
-
-	b.hidTransport = nil
-	b.isConnected = false
-	b.realtimeMode = false
-
-	select {
-	case <-b.stopChan:
-	default:
-		close(b.stopChan)
-	}
+	_, transport := b.resetConnectionLocked()
 	return transport
 }
 
@@ -780,30 +770,65 @@ func (b *BLEManager) Disconnect() {
 // handleDisconnect 处理意外断开
 func (b *BLEManager) handleDisconnect() {
 	b.mutex.Lock()
-	wasConnected := b.isConnected
-	// 先记下断开时走的是哪条传输：下面会把 hidTransport 清空，
-	// 之后再判断就只能一律当成 BLE 了。
-	wasHID := b.hidTransport != nil
-	b.isConnected = false
-	b.realtimeMode = false
-	// 读循环已经退出，句柄已由它自己关闭；清掉引用避免 Disconnect 再等一次。
-	b.hidTransport = nil
+	wasConnected, transport := b.resetConnectionLocked()
 	b.mutex.Unlock()
 
-	if wasConnected {
-		select {
-		case <-b.stopChan:
-		default:
-			close(b.stopChan)
-		}
-		if wasHID {
-			b.logInfo("BS1 USB HID 连接已断开")
-		} else {
-			b.logInfo("BS1 BLE 连接已断开")
-		}
-		if b.onDisconnect != nil {
-			b.onDisconnect()
-		}
+	if transport != nil {
+		// 目前只有 BLE 心跳会走到这里，HID 传输不会出现；万一出现，读循环还在跑，
+		// 只能请求它停下，句柄仍由它自己关闭，不能在这里 Close。
+		transport.requestStop()
+	}
+	b.reportDisconnect(wasConnected, transport != nil)
+}
+
+// handleHIDTransportLost 处理 HID 读循环的异常退出。
+//
+// 只有退出的仍是当前传输时才走断开流程：Close 超时后旧读循环可能晚些才退出，
+// 那时也许已经重连上了新的传输，不能拿旧循环的退出去拆新连接。
+func (b *BLEManager) handleHIDTransportLost(transport *bs1HIDTransport) {
+	b.mutex.Lock()
+	if b.hidTransport != transport {
+		b.mutex.Unlock()
+		return
+	}
+	wasConnected, _ := b.resetConnectionLocked()
+	b.mutex.Unlock()
+
+	b.reportDisconnect(wasConnected, true)
+}
+
+// resetConnectionLocked 复位连接状态，返回复位前是否已连接以及被摘下的 HID 传输
+// （BLE 连接时为 nil）。调用方必须持有 b.mutex 写锁。
+//
+// stopChan 在锁内关闭：放到锁外的话，期间建立的新连接会换上新的 stopChan，
+// 随后被这里误关，新连接的心跳协程跟着退出。
+func (b *BLEManager) resetConnectionLocked() (wasConnected bool, transport *bs1HIDTransport) {
+	wasConnected = b.isConnected
+	transport = b.hidTransport
+	b.isConnected = false
+	b.realtimeMode = false
+	b.hidTransport = nil
+
+	select {
+	case <-b.stopChan:
+	default:
+		close(b.stopChan)
+	}
+	return wasConnected, transport
+}
+
+// reportDisconnect 在锁外记录断开并通知上层。
+func (b *BLEManager) reportDisconnect(wasConnected, wasHID bool) {
+	if !wasConnected {
+		return
+	}
+	if wasHID {
+		b.logInfo("BS1 USB HID 连接已断开")
+	} else {
+		b.logInfo("BS1 BLE 连接已断开")
+	}
+	if b.onDisconnect != nil {
+		b.onDisconnect()
 	}
 }
 
