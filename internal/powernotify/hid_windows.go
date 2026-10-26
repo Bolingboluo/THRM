@@ -50,14 +50,14 @@ type hidArrivalNotifier struct {
 	stopOnce    sync.Once
 }
 
-func RegisterHIDInterfaceArrivalNotifications(vendorID uint16, productIDs []uint16, onArrival func(string)) (func(), error) {
+func RegisterHIDInterfaceArrivalNotifications(devices []HIDDeviceID, onArrival func(string)) (func(), error) {
 	if err := procCMRegisterNotification.Find(); err != nil {
 		return nil, fmt.Errorf("当前系统不支持 HID 接口通知: %w", err)
 	}
 
 	n := &hidArrivalNotifier{onArrival: onArrival}
-	for _, productID := range productIDs {
-		n.identifiers = append(n.identifiers, fmt.Sprintf("vid_%04x&pid_%04x", vendorID, productID))
+	for _, d := range devices {
+		n.identifiers = append(n.identifiers, fmt.Sprintf("vid_%04x&pid_%04x", d.VendorID, d.ProductID))
 	}
 	n.callback = windows.NewCallback(func(_ uintptr, _ uintptr, action uint32, eventData unsafe.Pointer, eventDataSize uint32) uintptr {
 		defer func() { _ = recover() }()

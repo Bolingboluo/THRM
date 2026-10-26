@@ -167,8 +167,16 @@ func (a *CoreApp) Start() error {
 		a.logInfo("已注册系统睡眠/唤醒通知")
 	}
 	if stop, err := powernotify.RegisterHIDInterfaceArrivalNotifications(
-		device.VendorID,
-		[]uint16{device.ProductIDBS2PRO, device.ProductIDBS3, device.ProductIDBS3PRO, device.ProductIDBS2},
+		[]powernotify.HIDDeviceID{
+			// BS2 / BS3 系列（VID 0x37D7）
+			{VendorID: device.VendorID, ProductID: device.ProductIDBS2PRO},
+			{VendorID: device.VendorID, ProductID: device.ProductIDBS3},
+			{VendorID: device.VendorID, ProductID: device.ProductIDBS3PRO},
+			{VendorID: device.VendorID, ProductID: device.ProductIDBS2},
+			// BS1 用独立的 VID/PID。不登记的话，BS1 插上线时收不到到达通知，
+			// 而健康检查又因为“通知已注册”放慢轮询，结果是只能手动点连接。
+			{VendorID: device.BS1HIDVendorID, ProductID: device.BS1HIDProductID},
+		},
 		a.onSupportedHIDArrival,
 	); err != nil {
 		a.logDebug("注册 HID 接口到达通知失败，将使用周期性重试兜底: %v", err)

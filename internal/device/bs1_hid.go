@@ -18,8 +18,11 @@ import (
 //
 // 依据：官方 HIDClient.Send 的 IsBS1Serial 分支；已在真机（固件 0.0.6.02）验证。
 const (
-	bs1HIDVendorID  = 0x04A0
-	bs1HIDProductID = 0x2501
+	// BS1HIDVendorID / BS1HIDProductID 导出给 coreapp 注册 HID 接口到达通知用：
+	// BS1 与 BS2 系列的 VID 不同，通知必须按各自的 VID/PID 分别登记，
+	// 否则插上线时 Core 收不到到达事件，只能等用户手动点“连接”。
+	BS1HIDVendorID  = 0x04A0
+	BS1HIDProductID = 0x2501
 
 	bs1HIDOutputReportID = 0x01
 	// bs1HIDInputReportID 是应答报文的首字节。这里只作说明用：解析由
@@ -80,12 +83,14 @@ func buildBS1HIDReport(frame []byte) []byte {
 //
 // 只接受 Usage Page >= 0xFF00 的厂商自定义集合，避免误选同一设备上的
 // 键盘/鼠标集合（BS1 描述符里可能有多个集合）。
-func enumerateBS1HID() (path, productName string, ok bool) {
+//
+// 与 enumerateVendorHID 一样声明成变量，测试可以替换它来模拟“没有 BS1 在场”。
+var enumerateBS1HID = func() (path, productName string, ok bool) {
 	var namedPath, namedProduct string
 	var fallbackPath, fallbackProduct string
 
-	_ = hid.Enumerate(bs1HIDVendorID, 0, func(info *hid.DeviceInfo) error {
-		if info.VendorID != bs1HIDVendorID || info.ProductID != bs1HIDProductID {
+	_ = hid.Enumerate(BS1HIDVendorID, 0, func(info *hid.DeviceInfo) error {
+		if info.VendorID != BS1HIDVendorID || info.ProductID != BS1HIDProductID {
 			return nil
 		}
 		if info.UsagePage < bs1HIDVendorUsagePageMin {

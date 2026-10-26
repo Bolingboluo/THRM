@@ -300,7 +300,7 @@ func (b *BLEManager) ConnectHID() (bool, map[string]string) {
 		"product":      name,
 		"serial":       "",
 		"model":        "BS1",
-		"productId":    fmt.Sprintf("0x%04X", bs1HIDProductID),
+		"productId":    fmt.Sprintf("0x%04X", BS1HIDProductID),
 	}
 }
 
