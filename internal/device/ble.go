@@ -54,6 +54,13 @@ type BLEManager struct {
 	// 两种传输共用本类型之上的全部 BS1 功能逻辑——命令集、应答等待、
 	// 0xEF 状态解析、调试记录——只有"怎么收发一帧"这一层不同。
 	hidTransport *bs1HIDTransport
+
+	// hidUnresponsive 记录最近一次 HID 连接失败是否属于"设备在枚举列表里但不响应"。
+	//
+	// 这种情况和"设备没插"要分开处理：前者需要用户拔插 USB 线，光靠软件重连
+	// 永远不会成功（已实测：新句柄、旧句柄、0x05 握手全部无应答）。CoreApp 据此
+	// 给用户发一次系统通知，而不是让他反复点「重新连接」。
+	hidUnresponsive bool
 }
 
 const defaultBLEScanTimeout = 10 * time.Second
@@ -261,6 +268,13 @@ func (b *BLEManager) ConnectHID() (bool, map[string]string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
+	// 每次尝试都重新判定"设备是否已枚举但不响应"。
+	//
+	// 这个结论只对当前这一刻的 USB 状态有效：设备一旦被拔下改接充电头，
+	// 就应该正常回退到 BLE。若不在入口重置，上一次的 true 会一直残留，
+	// connect() 就会一直跳过 BLE 扫描，蓝牙再也连不上。
+	b.hidUnresponsive = false
+
 	if b.isConnected {
 		return true, nil
 	}
@@ -288,6 +302,26 @@ func (b *BLEManager) ConnectHID() (bool, map[string]string) {
 			b.handleDisconnect()
 		}
 	}()
+
+	// 句柄能打开不代表设备在响应。系统睡眠唤醒后，设备会留在枚举列表里却对
+	// 任何命令都不应答（实测新句柄、旧句柄、0x05 握手全部无应答），只有重新
+	// 枚举 USB 才能恢复。不等第一帧就宣告连接成功，Core 会进入「已连接但转速
+	// 空白」的假状态，而且每次自动重连都会重演一遍。
+	if !transport.WaitFirstFrame(bs1HIDProbeTimeout) {
+		// Run 收到 stop 会返回 nil，因此不会触发 handleDisconnect，可以安全复位。
+		if !transport.Close(bs1HIDCloseTimeout) {
+			b.logError("BS1 HID 读循环未在超时内退出，放弃本次连接")
+		}
+		b.hidTransport = nil
+		b.isConnected = false
+		// 不能把 stopChan 置 nil：detachHIDTransport / Disconnect 里都是
+		// "select 默认分支 close(b.stopChan)"，close(nil) 会直接 panic。
+		// 保持这个已创建的通道开着即可，后续正常路径会关它。
+		b.hidUnresponsive = true
+		b.logError("BS1 USB HID 设备无响应（%v 内未收到任何数据）: 设备仍在系统里但不再通信，"+
+			"请拔下 USB-C 线重新插入（或重启电脑）。软件重连无法恢复。", bs1HIDProbeTimeout)
+		return false, nil
+	}
 
 	name := productName
 	if name == "" {
@@ -778,6 +812,16 @@ func (b *BLEManager) IsConnected() bool {
 	b.mutex.RLock()
 	defer b.mutex.RUnlock()
 	return b.isConnected
+}
+
+// HIDUnresponsive 报告最近一次 HID 连接失败是否因为"设备在枚举列表里但不响应"。
+//
+// 这种状态下软件重连永远不会成功（实测新句柄、旧句柄、0x05 握手全部无应答），
+// 只能靠用户拔插 USB 线或重启系统，所以要和普通的"设备不在"区分开。
+func (b *BLEManager) HIDUnresponsive() bool {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+	return b.hidUnresponsive
 }
 
 // GetCurrentFanData 获取当前风扇数据

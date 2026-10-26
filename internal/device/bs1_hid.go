@@ -45,6 +45,20 @@ const (
 	// 做法在事务期间切到 hidBusyReadPollInterval。
 	bs1HIDIdleSleep = hidReadPollInterval
 
+	// bs1HIDIdleTimeout 是读循环的静默上限：超过这么久一帧都没收到就判定设备停止响应。
+	//
+	// BS1 无论风扇转不转都会主动推 0xEF（实测停转时仍约 2 帧/秒），所以静默 20 秒
+	// 一定是异常，而不是"设备没什么可报的"。典型场景：系统睡眠唤醒后 USB selective
+	// suspend 让设备留在枚举列表里却不再响应任何通信——不主动断开的话，Core 会一直
+	// 显示「已连接」而转速空白，用户无从判断出了什么事。
+	bs1HIDIdleTimeout = 20 * time.Second
+
+	// bs1HIDProbeTimeout 是连接后等待第一帧的上限。
+	//
+	// 句柄能打开不代表设备在响应（同样发生在唤醒后）。用它把"真的连上"和
+	// "设备装死"区分开，避免进入「连上 → 静默超时 → 断开 → 又连上」的循环。
+	bs1HIDProbeTimeout = 2 * time.Second
+
 	// bs1HIDCloseTimeout 是断开时等待读循环退出的上限。
 	bs1HIDCloseTimeout = 3 * time.Second
 )
@@ -129,6 +143,10 @@ type bs1HIDTransport struct {
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
+
+	// firstFrame 在读循环收到第一帧时关闭，供连接阶段探测设备是否真的在响应。
+	firstFrameOnce sync.Once
+	firstFrame     chan struct{}
 }
 
 // newBS1HIDTransport 打开指定路径的 HID 接口并设为非阻塞读。
@@ -145,10 +163,23 @@ func newBS1HIDTransport(path string) (*bs1HIDTransport, error) {
 		return nil, fmt.Errorf("设置 BS1 HID 非阻塞模式失败: %w", err)
 	}
 	return &bs1HIDTransport{
-		dev:  dev,
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		dev:        dev,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		firstFrame: make(chan struct{}),
 	}, nil
+}
+
+// WaitFirstFrame 等待读循环收到第一帧，超时返回 false。
+//
+// 用于连接阶段区分"设备在响应"和"句柄打开了但设备装死"。
+func (t *bs1HIDTransport) WaitFirstFrame(timeout time.Duration) bool {
+	select {
+	case <-t.firstFrame:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Write 发送一帧协议数据（不等待应答）。
@@ -183,6 +214,7 @@ func (t *bs1HIDTransport) Run(onFrame func(raw []byte)) (err error) {
 	}()
 
 	buffer := make([]byte, bs1HIDReadBufferSize)
+	lastFrameAt := time.Now()
 	for {
 		select {
 		case <-t.stop:
@@ -193,20 +225,40 @@ func (t *bs1HIDTransport) Run(onFrame func(raw []byte)) (err error) {
 		n, readErr := t.dev.Read(buffer)
 		if readErr != nil {
 			if readErr == hid.ErrTimeout {
+				if idleErr := t.checkIdle(lastFrameAt); idleErr != nil {
+					return idleErr
+				}
 				time.Sleep(bs1HIDIdleSleep)
 				continue
 			}
 			return fmt.Errorf("读取 BS1 HID 数据失败: %w", readErr)
 		}
 		if n <= 0 {
+			if idleErr := t.checkIdle(lastFrameAt); idleErr != nil {
+				return idleErr
+			}
 			time.Sleep(bs1HIDIdleSleep)
 			continue
 		}
+
+		lastFrameAt = time.Now()
+		t.firstFrameOnce.Do(func() { close(t.firstFrame) })
 
 		raw := make([]byte, n)
 		copy(raw, buffer[:n])
 		onFrame(raw)
 	}
+}
+
+// checkIdle 在长时间收不到任何数据时返回错误，由调用方走断开流程。
+//
+// 只读超时/空读本身不是错误（设备空闲时就是这样），但持续静默超过
+// bs1HIDIdleTimeout 说明设备已经不再说话，必须当成掉线处理。
+func (t *bs1HIDTransport) checkIdle(lastFrameAt time.Time) error {
+	if time.Since(lastFrameAt) < bs1HIDIdleTimeout {
+		return nil
+	}
+	return fmt.Errorf("BS1 HID 已 %v 未收到任何数据，设备可能已停止响应", bs1HIDIdleTimeout)
 }
 
 // Close 请求读循环停止，并等待它退出（句柄由读循环自己关闭）。

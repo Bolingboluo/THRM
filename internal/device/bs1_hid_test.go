@@ -195,3 +195,23 @@ func TestHandleHIDFrameToleratesNonProtocolData(t *testing.T) {
 		t.Errorf("非协议数据产生了 FanData")
 	}
 }
+
+// "设备已枚举但不响应"的结论只对当前 USB 状态有效。
+//
+// 设备被拔下改接充电头后必须能回退到 BLE；若上一次的结论残留下来，
+// connect() 会一直跳过 BLE 扫描，蓝牙就再也连不上了。
+func TestConnectHIDResetsUnresponsiveFlagOnEachAttempt(t *testing.T) {
+	original := enumerateBS1HID
+	enumerateBS1HID = func() (string, string, bool) { return "", "", false }
+	t.Cleanup(func() { enumerateBS1HID = original })
+
+	b := NewBLEManager(nil)
+	b.hidUnresponsive = true
+
+	if ok, _ := b.ConnectHID(); ok {
+		t.Fatal("枚举不到设备时 ConnectHID 不应返回成功")
+	}
+	if b.HIDUnresponsive() {
+		t.Fatal("本次尝试没有设备，上一次的「无响应」结论必须被清掉")
+	}
+}

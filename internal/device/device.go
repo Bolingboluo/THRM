@@ -479,6 +479,14 @@ func (m *Manager) connect(preferLastTransport bool) (bool, map[string]string) {
 		return true, bs1Info
 	}
 
+	// 设备插着 USB 却不响应（睡眠唤醒后的典型状态）：它此时已经切到 USB 模式，
+	// 不会广播 BLE——实测设备活着且插着 USB 时扫描 15 秒扫不到任何 BS1 广播。
+	// 再去扫只是白等一个 10 秒的扫描超时，所以直接判定本次失败。
+	if m.bleManager.HIDUnresponsive() {
+		m.logError("BS1 已枚举但不响应，跳过 BLE 兜底扫描（插着 USB 时设备不广播蓝牙）")
+		return false, nil
+	}
+
 	var sinceLastBLEScan time.Duration = -1
 	if !m.lastBLEScanAt.IsZero() {
 		sinceLastBLEScan = time.Since(m.lastBLEScanAt)
@@ -715,6 +723,12 @@ func (m *Manager) IsConnected() bool {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	return m.isConnected
+}
+
+// HIDUnresponsive 报告最近一次连接失败是否因为 BS1 的 USB HID 设备
+// "还在系统里但不再通信"。这种状态只能靠拔插 USB 线或重启系统恢复。
+func (m *Manager) HIDUnresponsive() bool {
+	return m.bleManager.HIDUnresponsive()
 }
 
 // ConnectionGeneration returns a monotonically increasing identifier for each

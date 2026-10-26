@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/TIANLI0/THRM/internal/coremsg"
 	"github.com/TIANLI0/THRM/internal/ipc"
 	"github.com/TIANLI0/THRM/internal/temperature"
 	"github.com/TIANLI0/THRM/internal/types"
@@ -402,6 +403,29 @@ func (a *CoreApp) runReconnectLoop(reason string, retryDelays []time.Duration, c
 	logFailure("所有重连尝试均失败，等待下次健康检查")
 }
 
+// notifyHIDUnresponsive 在 BS1 的 USB 通道"设备在系统里但不再通信"时提醒用户。
+//
+// 这种状态软件重连永远修不好：实测新句柄、旧句柄、连 0x05 握手都无应答，
+// 只有拔插 USB 线或重启系统能恢复。
+//
+// 只在用户手动点「连接」失败时调用。不做自动提醒是因为时机无法把握：自动重连
+// 发生在刚唤醒、桌面还没出来的时候，实测通知会落在锁屏阶段，用户根本看不见
+// （只能事后去通知中心翻）。与其猜"用户什么时候在看屏幕"，不如等他主动来点——
+// 那时的反馈一定落在眼前。
+func (a *CoreApp) notifyHIDUnresponsive() {
+	if !a.deviceManager.HIDUnresponsive() {
+		return
+	}
+	a.logError("BS1 USB 通道无响应：设备仍在系统中但不再通信，已提示用户重新插拔 USB-C 线")
+	if a.notifier == nil {
+		return
+	}
+	a.notifier.Notify(
+		coremsg.T(coremsg.NotifyDeviceUnresponsiveTitle),
+		coremsg.T(coremsg.NotifyDeviceUnresponsiveBody),
+	)
+}
+
 func shouldReconnectAfterResume(proactivelySuspended, resumeReconnectWanted, autoReconnectSuppressed, forceReconnect bool) bool {
 	if proactivelySuspended {
 		return resumeReconnectWanted
@@ -706,7 +730,12 @@ func (a *CoreApp) safeRun(name string, fn func()) {
 
 // ConnectDevice handles a user-initiated connection request.
 func (a *CoreApp) ConnectDevice() bool {
-	return a.connectDevice(true)
+	ok := a.connectDevice(true)
+	if !ok {
+		// 用户主动点了「连接」却失败，立刻告诉他为什么、该怎么办。
+		a.notifyHIDUnresponsive()
+	}
+	return ok
 }
 
 // connectDevice collapses concurrent IPC, startup, health-check, and reconnect
