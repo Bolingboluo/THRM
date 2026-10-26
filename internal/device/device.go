@@ -459,6 +459,34 @@ func (m *Manager) connect(preferLastTransport bool) (bool, map[string]string) {
 		return true, info
 	}
 
+	// BS2/BS3 系列未找到。BS1 插 USB 线时同样走 HID，但报文布局与 BS2 不同
+	// （32 字节、Report ID 0x01、校验和挪到末字节），因此交给 bleManager 内部的
+	// HID 传输处理，BS1 的命令集与状态解析全部原样复用。
+	//
+	// 这一步必须排在 shouldSkipBLEFallback 之前：上一次连的是 BS2 时该函数会
+	// 直接跳过整个 BLE 分支，插着的 BS1 就永远连不上。
+	if success, bs1Info := m.bleManager.ConnectHID(); success {
+		m.isConnected = true
+		// BS1 的 deviceType 仍是 DeviceTypeBLE：它表示"走 BS1 协议栈"，
+		// 具体传输（BLE 还是 USB HID）由 bleManager 内部决定。
+		m.deviceType = types.DeviceTypeBLE
+		m.lastDeviceType = types.DeviceTypeBLE
+		m.productID = 0
+		m.currentFanData.Store(nil)
+		m.resetRealtimeControlStateLocked()
+		m.connectionGen.Add(1)
+		m.logInfo("BS1 USB HID 设备连接成功")
+		return true, bs1Info
+	}
+
+	// 设备插着 USB 却不响应（睡眠唤醒后的典型状态）：它此时已经切到 USB 模式，
+	// 不会广播 BLE——实测设备活着且插着 USB 时扫描 15 秒扫不到任何 BS1 广播。
+	// 再去扫只是白等一个 10 秒的扫描超时，所以直接判定本次失败。
+	if m.bleManager.HIDUnresponsive() {
+		m.logError("BS1 已枚举但不响应，跳过 BLE 兜底扫描（插着 USB 时设备不广播蓝牙）")
+		return false, nil
+	}
+
 	var sinceLastBLEScan time.Duration = -1
 	if !m.lastBLEScanAt.IsZero() {
 		sinceLastBLEScan = time.Since(m.lastBLEScanAt)
@@ -474,8 +502,8 @@ func (m *Manager) connect(preferLastTransport bool) (bool, map[string]string) {
 		return false, nil
 	}
 
-	// HID 连接失败，尝试 BLE 连接 (BS1)
-	m.logInfo("HID 设备未找到，尝试 BLE 扫描 BS1 设备...")
+	// 两种 HID 都没找到，尝试 BLE 连接 (BS1)
+	m.logInfo("未找到可用的 USB HID 设备，尝试 BLE 扫描 BS1 设备...")
 	m.lastBLEScanAt = time.Now()
 	m.mutex.Unlock() // 释放锁，BLE 扫描可能耗时较长
 	success, bleInfo := m.bleManager.Connect()
@@ -695,6 +723,12 @@ func (m *Manager) IsConnected() bool {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	return m.isConnected
+}
+
+// HIDUnresponsive 报告最近一次连接失败是否因为 BS1 的 USB HID 设备
+// "还在系统里但不再通信"。这种状态只能靠拔插 USB 线或重启系统恢复。
+func (m *Manager) HIDUnresponsive() bool {
+	return m.bleManager.HIDUnresponsive()
 }
 
 // ConnectionGeneration returns a monotonically increasing identifier for each

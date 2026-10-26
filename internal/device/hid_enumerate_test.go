@@ -92,6 +92,12 @@ func TestReconnectWithoutDeviceEnumeratesOnceAndQuietsRepeats(t *testing.T) {
 	}
 	t.Cleanup(func() { enumerateVendorHID = original })
 
+	// BS1 走独立的枚举函数，必须一起置空：否则本机真的插着 BS1 时这里会连上，
+	// 测试结果就取决于跑测试的机器有没有接设备。
+	originalBS1 := enumerateBS1HID
+	enumerateBS1HID = func() (string, string, bool) { return "", "", false }
+	t.Cleanup(func() { enumerateBS1HID = originalBS1 })
+
 	logs := &levelRecorder{}
 	m := NewManager(logs)
 	m.SeedLastTransport(types.DeviceTypeHID) // 上次是 HID：不会走 BS1 的 BLE 扫描

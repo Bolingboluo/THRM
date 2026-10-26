@@ -57,6 +57,11 @@ const (
 
 	NotifyDefaultTitle Key = "notify.defaultTitle"
 
+	// NotifyDeviceUnresponsive 用于 BS1 走 USB 时"设备还在系统里但不再通信"的提醒。
+	// 这种状态软件重连永远修不好，只有拔插 USB 线或重启系统能恢复。
+	NotifyDeviceUnresponsiveTitle Key = "notify.deviceUnresponsiveTitle"
+	NotifyDeviceUnresponsiveBody  Key = "notify.deviceUnresponsiveBody"
+
 	HotkeyTitle                  Key = "hotkey.title"
 	HotkeyFailedTitle            Key = "hotkey.failedTitle"
 	HotkeyUnknownAction          Key = "hotkey.unknownAction"
@@ -129,6 +134,9 @@ var catalog = map[string]map[Key]string{
 
 		NotifyDefaultTitle: "功能变动",
 
+		NotifyDeviceUnresponsiveTitle: "BS1 USB 通道无响应",
+		NotifyDeviceUnresponsiveBody:  "设备仍在系统中，但已不再通信。请拔下 USB-C 线重新插入，或重启电脑。软件重连无法恢复。",
+
 		HotkeyTitle:                  "%s 快捷键",
 		HotkeyFailedTitle:            "%s 快捷键失败",
 		HotkeyUnknownAction:          "未知快捷键动作",
@@ -195,6 +203,9 @@ var catalog = map[string]map[Key]string{
 
 		NotifyDefaultTitle: "Feature updated",
 
+		NotifyDeviceUnresponsiveTitle: "BS1 USB link unresponsive",
+		NotifyDeviceUnresponsiveBody:  "The device is still present but no longer responding. Unplug and reinsert the USB-C cable, or restart the computer. Reconnecting in software cannot recover it.",
+
 		HotkeyTitle:                  "%s hotkey",
 		HotkeyFailedTitle:            "%s hotkey failed",
 		HotkeyUnknownAction:          "Unknown hotkey action",
@@ -260,6 +271,9 @@ var catalog = map[string]map[Key]string{
 		CurveDefaultName: "デフォルト",
 
 		NotifyDefaultTitle: "機能が更新されました",
+
+		NotifyDeviceUnresponsiveTitle: "BS1 USB 接続が応答しません",
+		NotifyDeviceUnresponsiveBody:  "デバイスは認識されていますが通信できません。USB-C ケーブルを抜き差しするか、PC を再起動してください。ソフト側の再接続では復旧しません。",
 
 		HotkeyTitle:                  "%s ショートカット",
 		HotkeyFailedTitle:            "%s ショートカット失敗",
