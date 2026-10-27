@@ -8,25 +8,25 @@ import (
 
 type testLogger struct{}
 
-func (l testLogger) Info(format string, v ...any)    {}
-func (l testLogger) Error(format string, v ...any)   {}
-func (l testLogger) Warn(format string, v ...any)    {}
-func (l testLogger) Debug(format string, v ...any)   {}
-func (l testLogger) Close()                          {}
-func (l testLogger) CleanOldLogs()                   {}
-func (l testLogger) SetDebugMode(enabled bool)       {}
-func (l testLogger) GetLogDir() string               { return "" }
+func (l testLogger) Info(format string, v ...any)  {}
+func (l testLogger) Error(format string, v ...any) {}
+func (l testLogger) Warn(format string, v ...any)  {}
+func (l testLogger) Debug(format string, v ...any) {}
+func (l testLogger) Close()                        {}
+func (l testLogger) CleanOldLogs()                 {}
+func (l testLogger) SetDebugMode(enabled bool)     {}
+func (l testLogger) GetLogDir() string             { return "" }
 
 type testLogger2 struct{}
 
-func (l testLogger2) Info(format string, v ...any)    {}
-func (l testLogger2) Error(format string, v ...any)   {}
-func (l testLogger2) Warn(format string, v ...any)    {}
-func (l testLogger2) Debug(format string, v ...any)   {}
-func (l testLogger2) Close()                          {}
-func (l testLogger2) CleanOldLogs()                   {}
-func (l testLogger2) SetDebugMode(enabled bool)       {}
-func (l testLogger2) GetLogDir() string               { return "" }
+func (l testLogger2) Info(format string, v ...any)  {}
+func (l testLogger2) Error(format string, v ...any) {}
+func (l testLogger2) Warn(format string, v ...any)  {}
+func (l testLogger2) Debug(format string, v ...any) {}
+func (l testLogger2) Close()                        {}
+func (l testLogger2) CleanOldLogs()                 {}
+func (l testLogger2) SetDebugMode(enabled bool)     {}
+func (l testLogger2) GetLogDir() string             { return "" }
 
 func TestNewManager(t *testing.T) {
 	m := NewManager(testLogger{}, nil)

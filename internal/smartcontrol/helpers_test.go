@@ -121,14 +121,14 @@ func TestFilterTransientSpike(t *testing.T) {
 func TestNormalizeConfig(t *testing.T) {
 	curve := types.GetDefaultFanCurve()
 	cfg := types.SmartControlConfig{
-		TargetTemp:    0,
+		TargetTemp:     0,
 		Aggressiveness: 20,
-		Hysteresis:    99,
-		MinRPMChange:  0,
-		RampUpLimit:   10,
-		RampDownLimit: 2000,
-		LearnRate:     0,
-		LearningBias:  "invalid",
+		Hysteresis:     99,
+		MinRPMChange:   0,
+		RampUpLimit:    10,
+		RampDownLimit:  2000,
+		LearnRate:      0,
+		LearningBias:   "invalid",
 	}
 	normalized, changed := NormalizeConfig(cfg, curve, false)
 	if !changed {

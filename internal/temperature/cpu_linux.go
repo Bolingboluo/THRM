@@ -155,4 +155,3 @@ func scoreCPUZoneType(zoneType string) int {
 		return 10
 	}
 }
-

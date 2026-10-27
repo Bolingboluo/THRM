@@ -294,7 +294,7 @@ type DeviceSettings struct {
 	FirmwareVersion          string   `json:"firmwareVersion,omitempty"`
 	FirmwareVersionRaw       string   `json:"firmwareVersionRaw,omitempty"`
 	ThrmFirmwareVersion      int      `json:"thrmFirmwareVersion,omitempty"` // THRM 定制固件版本（0=原厂）
-	FirmwareReadStatus       string   `json:"firmwareReadStatus,omitempty"` // ready/failed/unsupported
+	FirmwareReadStatus       string   `json:"firmwareReadStatus,omitempty"`  // ready/failed/unsupported
 	FirmwareReadError        string   `json:"firmwareReadError,omitempty"`
 	DeviceIdentifier         string   `json:"deviceIdentifier,omitempty"`
 	IdentityMarker           string   `json:"identityMarker,omitempty"`

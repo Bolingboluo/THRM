@@ -5,31 +5,47 @@ import (
 )
 
 type testLogger struct {
-	infoCalled    int
-	errorCalled   int
-	warnCalled    int
-	debugCalled   int
-	closeCalled   int
-	cleanCalled   int
-	debugMode     bool
-	infoFormat    string
-	infoArgs      []any
-	errorFormat   string
-	errorArgs     []any
-	warnFormat    string
-	warnArgs      []any
-	debugFormat   string
-	debugArgs     []any
+	infoCalled  int
+	errorCalled int
+	warnCalled  int
+	debugCalled int
+	closeCalled int
+	cleanCalled int
+	debugMode   bool
+	infoFormat  string
+	infoArgs    []any
+	errorFormat string
+	errorArgs   []any
+	warnFormat  string
+	warnArgs    []any
+	debugFormat string
+	debugArgs   []any
 }
 
-func (l *testLogger) Info(format string, v ...any)  { l.infoCalled++; l.infoFormat = format; l.infoArgs = v }
-func (l *testLogger) Error(format string, v ...any) { l.errorCalled++; l.errorFormat = format; l.errorArgs = v }
-func (l *testLogger) Warn(format string, v ...any)  { l.warnCalled++; l.warnFormat = format; l.warnArgs = v }
-func (l *testLogger) Debug(format string, v ...any) { l.debugCalled++; l.debugFormat = format; l.debugArgs = v }
-func (l *testLogger) Close()                         { l.closeCalled++ }
-func (l *testLogger) CleanOldLogs()                  { l.cleanCalled++ }
-func (l *testLogger) SetDebugMode(enabled bool)      { l.debugMode = enabled }
-func (l *testLogger) GetLogDir() string              { return "/tmp/test-logs" }
+func (l *testLogger) Info(format string, v ...any) {
+	l.infoCalled++
+	l.infoFormat = format
+	l.infoArgs = v
+}
+func (l *testLogger) Error(format string, v ...any) {
+	l.errorCalled++
+	l.errorFormat = format
+	l.errorArgs = v
+}
+func (l *testLogger) Warn(format string, v ...any) {
+	l.warnCalled++
+	l.warnFormat = format
+	l.warnArgs = v
+}
+func (l *testLogger) Debug(format string, v ...any) {
+	l.debugCalled++
+	l.debugFormat = format
+	l.debugArgs = v
+}
+func (l *testLogger) Close()                    { l.closeCalled++ }
+func (l *testLogger) CleanOldLogs()             { l.cleanCalled++ }
+func (l *testLogger) SetDebugMode(enabled bool) { l.debugMode = enabled }
+func (l *testLogger) GetLogDir() string         { return "/tmp/test-logs" }
 
 func TestLoggerInterfaceSatisfied(t *testing.T) {
 	var _ Logger = &testLogger{}

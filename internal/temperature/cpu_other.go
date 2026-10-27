@@ -12,4 +12,3 @@ const platformHasCPUTempFallback = true
 func (r *Reader) readPlatformCPUTemp() int {
 	return 0
 }
-

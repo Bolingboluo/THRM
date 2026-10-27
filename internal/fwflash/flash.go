@@ -41,8 +41,8 @@ const (
 
 // Flashing 持有一次刷写会话的传输通道与芯片信息。
 type Flashing struct {
-	t     Transport
-	log   Logger
+	t         Transport
+	log       Logger
 	Chip      Chip
 	uid       []byte // uidSize 字节
 	btver     [4]byte

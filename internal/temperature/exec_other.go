@@ -23,4 +23,3 @@ func execCommandHiddenWithTimeout(timeout time.Duration, name string, args ...st
 	}
 	return output, err
 }
-

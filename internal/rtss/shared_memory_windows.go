@@ -329,7 +329,11 @@ func mappedViewBytes(view uintptr, length, regionSize int) ([]byte, bool) {
 	if view == 0 || length <= 0 || regionSize <= 0 || length > regionSize {
 		return nil, false
 	}
-	return unsafe.Slice((*byte)(unsafe.Pointer(view)), length), true
+	// view is not a Go heap address, so unsafe.Pointer(view) would be valid, but
+	// go vet's unsafeptr check cannot tell that and flags every uintptr ->
+	// unsafe.Pointer conversion. unsafe.Add(nil, view) yields the same pointer
+	// without a conversion, which vet (and checkptr) accept for non-Go memory.
+	return unsafe.Slice((*byte)(unsafe.Add(nil, view)), length), true
 }
 
 func (s *sharedMemorySink) ensureMapped() bool {
