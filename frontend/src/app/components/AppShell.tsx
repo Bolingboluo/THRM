@@ -123,10 +123,21 @@ function getFanSpinDuration(rpm?: number) {
   return 1.35;
 }
 
-type WailsDragStyle = CSSProperties & { ['--wails-draggable']?: 'drag' | 'no-drag' };
+type WindowControlRegion = 'minimize' | 'maximize' | 'close';
+
+type WailsDragStyle = CSSProperties & {
+  ['--wails-draggable']?: 'drag' | 'no-drag';
+  // 把自绘按钮报告给 Windows 当作原生标题栏按钮（需 Go 侧开启 WebView2CompositionHosting）：
+  // 最大化按钮因此能弹出 Win11 贴靠布局。点击仍会转发回页面，onClick 照常触发。
+  ['--wails-non-client-region']?: WindowControlRegion;
+};
 
 const DRAG_STYLE: WailsDragStyle = { '--wails-draggable': 'drag' };
 const NO_DRAG_STYLE: WailsDragStyle = { '--wails-draggable': 'no-drag' };
+
+function windowControlStyle(region: WindowControlRegion): WailsDragStyle {
+  return { ...NO_DRAG_STYLE, '--wails-non-client-region': region };
+}
 
 /* ──────────────────────────────────────────────────────────────
  * TitleBar — slim, fixed at the very top of the window.
@@ -136,11 +147,13 @@ const NO_DRAG_STYLE: WailsDragStyle = { '--wails-draggable': 'no-drag' };
 function TitleBarButton({
   icon,
   label,
+  region,
   onClick,
   danger = false,
 }: {
   icon: ReactNode;
   label: string;
+  region: WindowControlRegion;
   onClick: () => void;
   danger?: boolean;
 }) {
@@ -149,7 +162,7 @@ function TitleBarButton({
       type="button"
       aria-label={label}
       title={label}
-      style={NO_DRAG_STYLE}
+      style={windowControlStyle(region)}
       onClick={(event) => {
         event.stopPropagation();
         onClick();
@@ -206,13 +219,14 @@ function TitleBar({
         className="glacier-titlebar pointer-events-auto absolute right-0 top-0 z-[9999] flex h-10 items-center gap-0.5 bg-transparent pr-1"
         style={NO_DRAG_STYLE}
       >
-        <TitleBarButton icon={<Minus className="h-3.5 w-3.5" />} label={minimizeLabel} onClick={onMinimise} />
+        <TitleBarButton icon={<Minus className="h-3.5 w-3.5" />} label={minimizeLabel} region="minimize" onClick={onMinimise} />
         <TitleBarButton
           icon={isMaximised ? <Copy className="h-3 w-3" /> : <Square className="h-3 w-3" />}
           label={isMaximised ? restoreLabel : maximizeLabel}
+          region="maximize"
           onClick={onToggleMaximise}
         />
-        <TitleBarButton icon={<X className="h-3.5 w-3.5" />} label={closeLabel} onClick={onClose} danger />
+        <TitleBarButton icon={<X className="h-3.5 w-3.5" />} label={closeLabel} region="close" onClick={onClose} danger />
       </div>
     </>
   );

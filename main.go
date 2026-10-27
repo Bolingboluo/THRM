@@ -62,6 +62,12 @@ func main() {
 		MinHeight: 600,
 		Frameless: guiapp.DefaultFrameless(),
 		URL:       "/",
+		Windows: application.WindowsWindow{
+			// 用 DirectComposition 托管 WebView2，Wails 才能按前端标记的
+			// --wails-non-client-region 做原生命中测试：自绘最大化按钮返回 HTMAXBUTTON，
+			// 悬停时弹出 Win11 贴靠布局。WebView2 不支持时 Wails 自动退回窗口托管。
+			WebView2CompositionHosting: true,
+		},
 		Linux: application.LinuxWindow{
 			WebviewGpuPolicy: application.WebviewGpuPolicyAlways,
 		},
