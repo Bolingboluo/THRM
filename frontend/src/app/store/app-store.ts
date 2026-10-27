@@ -70,6 +70,34 @@ function reuseEqualStructure<T>(prev: unknown, next: T): T {
   return same ? (prev as T) : next;
 }
 
+const bridgeWarningFor = (data: types.TemperatureData | null) => {
+  const bridgeMessage = data?.bridgeMessage?.trim() ?? '';
+  return data?.bridgeOk === false ? bridgeMessage || getBridgeWarningMessage() : null;
+};
+
+// 把一帧温度追加进会话内历史；未到采样间隔等情况返回原数组，调用方据此判断有没有变化。
+const appendSessionHistory = (
+  points: TemperatureHistoryPoint[],
+  data: types.TemperatureData | null,
+  fanRpm: number | undefined,
+) => {
+  if (!data) return points;
+  const point = createLiveHistoryPoint({
+    updateTime: data.updateTime,
+    cpuTemp: data.cpuTemp,
+    gpuTemp: data.gpuTemp,
+    cpuPower: data.cpuPower,
+    gpuPower: data.gpuPower,
+    cpuFanRpm: (data as { cpuFanRpm?: number }).cpuFanRpm,
+    gpuFanRpm: (data as { gpuFanRpm?: number }).gpuFanRpm,
+  }, Number(fanRpm || 0));
+  if (!point) return points;
+  return appendSampledHistoryPoint(points, point, {
+    retentionMs: SESSION_HISTORY_RETENTION_MS,
+    limit: SESSION_HISTORY_LIMIT,
+  });
+};
+
 // 一小时可容纳的样本数（按固定采样间隔换算），用于把保留小时数换算成点数上限。
 const HISTORY_POINTS_PER_HOUR = Math.round((60 * 60 * 1000) / HISTORY_SAMPLE_INTERVAL_MS);
 
@@ -172,35 +200,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
   clearBridgeWarning: () => set({ bridgeWarning: null }),
 
   handleTemperaturePayload: (data) => {
-    const bridgeMessage = data?.bridgeMessage?.trim() ?? '';
     set({
       temperature: reuseEqualStructure(get().temperature, data),
-      bridgeWarning: data?.bridgeOk === false ? bridgeMessage || getBridgeWarningMessage() : null,
+      bridgeWarning: bridgeWarningFor(data),
     });
   },
 
   // fanRpm 缺省取 store 里的转速；窗口隐藏期间 store 不更新遥测，由调用方传入最新值。
+  // 没到采样间隔时数组原样返回，这时连同 state 一起原样返回，不通知订阅者。
   appendSessionHistoryPoint: (data, fanRpm) => {
-    if (!data) return;
-
-    const point = createLiveHistoryPoint({
-      updateTime: data.updateTime,
-      cpuTemp: data.cpuTemp,
-      gpuTemp: data.gpuTemp,
-      cpuPower: data.cpuPower,
-      gpuPower: data.gpuPower,
-      cpuFanRpm: (data as { cpuFanRpm?: number }).cpuFanRpm,
-      gpuFanRpm: (data as { gpuFanRpm?: number }).gpuFanRpm,
-    }, Number((fanRpm ?? get().fanData?.currentRpm) || 0));
-
-    if (!point) return;
-
-    set((state) => ({
-      sessionHistoryPoints: appendSampledHistoryPoint(state.sessionHistoryPoints, point, {
-        retentionMs: SESSION_HISTORY_RETENTION_MS,
-        limit: SESSION_HISTORY_LIMIT,
-      }),
-    }));
+    set((state) => {
+      const next = appendSessionHistory(state.sessionHistoryPoints, data, fanRpm ?? state.fanData?.currentRpm);
+      return next === state.sessionHistoryPoints ? state : { sessionHistoryPoints: next };
+    });
   },
 
   // 快照与实时推送共用一个入口，由 mergeTimelineEvents 负责去重与排序。
@@ -406,19 +418,27 @@ export const useAppStore = create<AppStore>((set, get) => ({
         telemetryTimer = null;
       }
       if (document.hidden) return;
+      // 转速、温度、会话历史合成一次 set：分开写会让每个订阅者的选择器在一次刷新里跑两三遍。
+      const state = get();
+      const patch: Partial<AppStore> = {};
+      let fanData = state.fanData;
       if (pendingFanData !== undefined) {
-        const previous = get().fanData;
-        const next = reuseEqualStructure(previous, pendingFanData);
+        fanData = reuseEqualStructure(state.fanData, pendingFanData);
         pendingFanData = undefined;
         // 转速推送每秒最多 4 次，内容完全没变时不写 store，首页与徽标就不必跟着重渲染。
-        if (next !== previous) set({ fanData: next });
+        if (fanData !== state.fanData) patch.fanData = fanData;
       }
       if (pendingTemperature !== undefined) {
         const data = pendingTemperature;
         pendingTemperature = undefined;
-        get().handleTemperaturePayload(data);
-        get().appendSessionHistoryPoint(data);
+        const temperature = reuseEqualStructure(state.temperature, data);
+        if (temperature !== state.temperature) patch.temperature = temperature;
+        const bridgeWarning = bridgeWarningFor(data);
+        if (bridgeWarning !== state.bridgeWarning) patch.bridgeWarning = bridgeWarning;
+        const sessionHistoryPoints = appendSessionHistory(state.sessionHistoryPoints, data, fanData?.currentRpm);
+        if (sessionHistoryPoints !== state.sessionHistoryPoints) patch.sessionHistoryPoints = sessionHistoryPoints;
       }
+      if (Object.keys(patch).length > 0) set(patch);
     };
     const scheduleTelemetryFlush = () => {
       if (telemetryTimer !== null || document.hidden) return;

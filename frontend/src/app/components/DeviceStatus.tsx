@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import Sortable from 'sortablejs';
+import type Sortable from 'sortablejs';
 import ConnectionRecoveryPanel from './ConnectionRecoveryPanel';
 import SpinningFanIcon from './SpinningFanIcon';
 // m + AppShell 里的 LazyMotion：动画特性异步加载，见 lib/motion-features.ts
@@ -35,6 +35,7 @@ import {
 import * as types from '@go/types';
 import { apiService } from '../services/api';
 import { useTemperatureHistory } from '../hooks/useTemperatureHistory';
+import { useWindowActive } from '../hooks/useWindowActive';
 import { useAppStore } from '../store/app-store';
 import { useShallow } from 'zustand/react/shallow';
 import { clipHistoryToRecentWindow, downsampleHistoryPoints, HOME_CHART_WINDOW_MS, type TemperatureHistoryPoint } from '../lib/temperature-history';
@@ -468,6 +469,18 @@ const getTempArcColor = (temp: number) => {
   return 'var(--primary)';
 };
 
+// "读取中…"前的呼吸点：与风扇图标一样，窗口失焦/不可见时暂停动画，免得透明窗口下合成器一直出帧。
+// 单独成组件订阅焦点，切换焦点时不必重渲染整个仪表。
+const LoadingPulseDot = memo(function LoadingPulseDot() {
+  const windowActive = useWindowActive();
+  return (
+    <span
+      className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60"
+      style={{ animationPlayState: windowActive ? 'running' : 'paused' }}
+    />
+  );
+});
+
 const TempGaugeDisplay = memo(function TempGaugeDisplay({
   temp,
   ready,
@@ -537,7 +550,7 @@ const TempGaugeDisplay = memo(function TempGaugeDisplay({
             <span className="text-xs font-medium text-muted-foreground/70">°C</span>
           </div>
           <span className="mt-1 inline-flex items-center gap-1 text-[11px] leading-none text-muted-foreground">
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60" />
+            <LoadingPulseDot />
             {t('deviceStatus.tempGauge.loading')}
           </span>
         </SemiGauge>
@@ -919,6 +932,12 @@ const LiveMiniFanCurveChart = memo(function LiveMiniFanCurveChart({
   return <MiniFanCurveChart curve={curve} currentTemp={currentTemp} onOpen={onOpen} />;
 });
 
+// 历史每 5 秒追加一个点，只有这张卡片需要跟着刷新，不必带动首页主体。
+const LiveTemperatureHistoryPanel = memo(function LiveTemperatureHistoryPanel({ onOpen }: { onOpen?: () => void }) {
+  const { points, enabled, source } = useTemperatureHistory();
+  return <TemperatureHistoryPanel points={points} enabled={enabled} source={source} onOpen={onOpen} />;
+});
+
 // 首页主体用到的慢变化遥测：全是原始值或布尔，浅比较不变就不重渲染。
 const selectHomeSlowTelemetry = (
   state: ReturnType<typeof useAppStore.getState>,
@@ -971,11 +990,11 @@ export default function DeviceStatus({
   const [bridgeWarningReady, setBridgeWarningReady] = useState(false);
   const [activeCurveProfileName, setActiveCurveProfileName] = useState('');
   const [bridgeStatus, setBridgeStatus] = useState<BridgeRuntimeStatus | null>(null);
-  const {
-    points: temperatureHistory,
-    enabled: temperatureHistoryEnabled,
-    source: temperatureHistorySource,
-  } = useTemperatureHistory();
+  // 历史快照照旧在首页挂载时就开始拉取（未连接时历史卡片不渲染，不能只靠它触发）。
+  const ensureTemperatureHistoryLoaded = useAppStore((state) => state.ensureTemperatureHistoryLoaded);
+  useEffect(() => {
+    ensureTemperatureHistoryLoaded();
+  }, [ensureTemperatureHistoryLoaded]);
   const [pawnIoReinstalling, setPawnIoReinstalling] = useState(false);
   const tempSource = (((config as any).tempSource as string) || 'max') as HomeTempSource;
   const modeShowsLiveRpm = !config.autoControl && !!config.customSpeedEnabled && !config.customSpeedRPM;
@@ -1195,48 +1214,57 @@ export default function DeviceStatus({
   // SortableJS 负责拖拽：它是直接把真实节点插到新位置，天然支持宽高不一样的卡片，
   // 不需要"把卡片互相平移到对方位置"那套预览，也就不会把栅格挪乱。
   // forceFallback 关掉原生 HTML5 拖放——WebView2 里原生拖放会和窗口拖动抢事件。
+  // 库本身按需加载：排序模式很少打开，不必让首页主包带着它。
   useEffect(() => {
     const grid = gridRef.current;
     if (!sortingActive || !grid) return;
 
-    const sortable = Sortable.create(grid, {
-      animation: 170,
-      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-      draggable: '[data-card-id]',
-      forceFallback: true,
-      fallbackOnBody: true,
-      fallbackTolerance: 4,
-      ghostClass: 'home-card-ghost',
-      chosenClass: 'home-card-chosen',
-      dragClass: 'home-card-dragging',
-      onEnd: (event) => {
-        const { item, from, oldIndex, newIndex } = event;
-        if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) return;
+    let disposed = false;
+    let sortable: Sortable | null = null;
+    void import('sortablejs').then(({ default: SortableLib }) => {
+      if (disposed) return;
+      sortable = SortableLib.create(grid, {
+        animation: 170,
+        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+        draggable: '[data-card-id]',
+        forceFallback: true,
+        fallbackOnBody: true,
+        fallbackTolerance: 4,
+        ghostClass: 'home-card-ghost',
+        chosenClass: 'home-card-chosen',
+        dragClass: 'home-card-dragging',
+        onEnd: (event) => {
+          const { item, from, oldIndex, newIndex } = event;
+          if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) return;
 
-        // 先把 DOM 放回原位，顺序完全交给 React 按状态渲染，
-        // 避免"库改过的 DOM"和"React 认为的 DOM"对不上。
-        const cards = Array.from(from.children).filter(
-          (child) => child instanceof HTMLElement && child.dataset.cardId,
-        );
-        from.removeChild(item);
-        const anchor = cards.filter((card) => card !== item)[oldIndex] ?? null;
-        from.insertBefore(item, anchor);
+          // 先把 DOM 放回原位，顺序完全交给 React 按状态渲染，
+          // 避免"库改过的 DOM"和"React 认为的 DOM"对不上。
+          const cards = Array.from(from.children).filter(
+            (child) => child instanceof HTMLElement && child.dataset.cardId,
+          );
+          from.removeChild(item);
+          const anchor = cards.filter((card) => card !== item)[oldIndex] ?? null;
+          from.insertBefore(item, anchor);
 
-        setCardOrder((previous) => {
-          const draggedId = (item as HTMLElement).dataset.cardId as HomeCardId | undefined;
-          if (!draggedId) return previous;
-          const visible = previous.filter((id) => cards.some((card) => (card as HTMLElement).dataset.cardId === id));
-          const targetId = visible[newIndex];
-          if (!targetId || targetId === draggedId) return previous;
-          const next = previous.filter((id) => id !== draggedId);
-          next.splice(next.indexOf(targetId) + (newIndex > oldIndex ? 1 : 0), 0, draggedId);
-          saveHomeCardOrder(next);
-          return next;
-        });
-      },
+          setCardOrder((previous) => {
+            const draggedId = (item as HTMLElement).dataset.cardId as HomeCardId | undefined;
+            if (!draggedId) return previous;
+            const visible = previous.filter((id) => cards.some((card) => (card as HTMLElement).dataset.cardId === id));
+            const targetId = visible[newIndex];
+            if (!targetId || targetId === draggedId) return previous;
+            const next = previous.filter((id) => id !== draggedId);
+            next.splice(next.indexOf(targetId) + (newIndex > oldIndex ? 1 : 0), 0, draggedId);
+            saveHomeCardOrder(next);
+            return next;
+          });
+        },
+      });
     });
 
-    return () => sortable.destroy();
+    return () => {
+      disposed = true;
+      sortable?.destroy();
+    };
   }, [sortingActive]);
 
   const resetCardOrder = useCallback(() => {
@@ -1350,7 +1378,11 @@ export default function DeviceStatus({
           icon={<Cpu className="h-4 w-4" />}
           label={t('deviceStatus.metrics.cpuTemperature')}
         />
-        <LiveTempGauge channel="cpu" />
+        {/* 核心明确报告 CPU 温度读不到时不再一直"读取中…"；原因与修复入口在告警条里，跟它同时出现。 */}
+        <LiveTempGauge
+          channel="cpu"
+          unavailableHint={cpuTempError && bridgeWarningReady ? t('fanCurve.history.summary.noCpuTemperature') : undefined}
+        />
       </div>
     ) : null,
     gpu: isConnected && !gpuMonitoringDisabled ? (
@@ -1478,12 +1510,7 @@ export default function DeviceStatus({
       <LiveMiniFanCurveChart curve={homeCurve} tempSource={tempSource} onOpen={onOpenCurveEditor} />
     ) : null,
     history: isConnected ? (
-      <TemperatureHistoryPanel
-        points={temperatureHistory}
-        enabled={temperatureHistoryEnabled}
-        source={temperatureHistorySource}
-        onOpen={onOpenHistoryDetails}
-      />
+      <LiveTemperatureHistoryPanel onOpen={onOpenHistoryDetails} />
     ) : null,
   };
 

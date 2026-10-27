@@ -75,20 +75,10 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
-/**
- * 设置页实际读到的温度字段。外层按这些字段做浅比较后再传进来：温度每次推送都是新对象，
- * 只有这些字段（传感器清单由 store 复用旧引用）变了才需要重渲染这个三千多行的组件。
- */
-export type ControlPanelTemperature = Pick<
-  types.TemperatureData,
-  'cpuTemp' | 'gpuTemp' | 'cpuModel' | 'gpuModel' | 'controlTemp' | 'controlSource' | 'cpuSensors' | 'gpuSensors' | 'gpuDevices' | 'selectedGpuDevice'
->;
-
 interface ControlPanelProps {
   config: types.AppConfig;
   onConfigChange: (config: types.AppConfig) => void;
   isConnected: boolean;
-  temperature: ControlPanelTemperature | null;
   legionFnQSupported: boolean;
   deviceModel: string | null;
   deviceSettings: DeviceSettings | null;
@@ -628,9 +618,139 @@ function ControlOverview({ isBs1 }: { isBs1: boolean }) {
   );
 }
 
+/* ── 温度基准 ──
+
+传感器结构体带着实时读数，温度每次推送都是新数组。设置页主体只关心清单本身（key、名称、
+显卡归属）和型号这类慢变化字段：序列化成签名来订阅，签名不变就不重渲染这个三千多行的组件。
+实时读数、温度文字交给下面几个小组件各自订阅 store。 */
+
+type AppState = ReturnType<typeof useAppStore.getState>;
+type SensorRef = { key: string; name: string };
+type GpuDeviceRef = { key: string; name: string; vendor: string; sensors: SensorRef[] };
+interface ControlTemperatureMeta {
+  cpuModel?: string;
+  gpuModel?: string;
+  selectedGpuDevice?: string;
+  cpuSensors: SensorRef[];
+  gpuSensors: SensorRef[];
+  gpuDevices: GpuDeviceRef[];
+}
+
+const EMPTY_SENSORS: types.TemperatureSensor[] = [];
+
+const toSensorRefs = (sensors: unknown): SensorRef[] =>
+  Array.isArray(sensors)
+    ? (sensors as types.TemperatureSensor[]).map((sensor) => ({ key: sensor.key, name: sensor.name }))
+    : [];
+
+// 选择器在每次 store 变化（含每秒数次的转速推送）时都会执行，同一帧温度只序列化一次。
+let temperatureSignatureSource: types.TemperatureData | null | undefined;
+let temperatureSignature: string | null = null;
+const selectControlTemperatureSignature = (state: AppState): string | null => {
+  const temperature = state.temperature;
+  if (temperature === temperatureSignatureSource) return temperatureSignature;
+  temperatureSignatureSource = temperature;
+  if (!temperature) {
+    temperatureSignature = null;
+    return null;
+  }
+  const meta: ControlTemperatureMeta = {
+    cpuModel: temperature.cpuModel,
+    gpuModel: temperature.gpuModel,
+    selectedGpuDevice: temperature.selectedGpuDevice,
+    cpuSensors: toSensorRefs(temperature.cpuSensors),
+    gpuSensors: toSensorRefs(temperature.gpuSensors),
+    gpuDevices: Array.isArray(temperature.gpuDevices)
+      ? temperature.gpuDevices.map((device) => ({
+        key: device.key,
+        name: device.name,
+        vendor: device.vendor,
+        sensors: toSensorRefs(device.sensors),
+      }))
+      : [],
+  };
+  temperatureSignature = JSON.stringify(meta);
+  return temperatureSignature;
+};
+
+// 与主体里 effectiveGpuSensors 同一规则，只是取带实时读数的原始清单（store 复用未变的引用）。
+const selectEffectiveGpuSensors = (state: AppState, activeGpuDeviceKey: string): types.TemperatureSensor[] => {
+  const temperature = state.temperature;
+  const devices = temperature?.gpuDevices;
+  const device = Array.isArray(devices) ? devices.find((item) => item.key === activeGpuDeviceKey) : undefined;
+  if (device && Array.isArray(device.sensors) && device.sensors.length > 0) return device.sensors;
+  return Array.isArray(temperature?.gpuSensors) ? temperature.gpuSensors : EMPTY_SENSORS;
+};
+
+const LiveCpuSensorMultiSelect = memo(function LiveCpuSensorMultiSelect(
+  props: Omit<React.ComponentProps<typeof MultiSelect>, 'options'>,
+) {
+  const sensors = useAppStore((state) => state.temperature?.cpuSensors);
+  const options = useMemo(
+    () => (Array.isArray(sensors) ? sensors : EMPTY_SENSORS).map((sensor) => ({ value: sensor.key, label: `${sensor.name} (${sensor.value}°C)` })),
+    [sensors],
+  );
+  return <MultiSelect {...props} options={options} />;
+});
+
+const LiveGpuSensorSelect = memo(function LiveGpuSensorSelect({
+  activeGpuDeviceKey,
+  value,
+  onChange,
+  disabled,
+}: {
+  activeGpuDeviceKey: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  const { t, i18n } = useTranslation();
+  const sensors = useAppStore((state) => selectEffectiveGpuSensors(state, activeGpuDeviceKey));
+  const options = useMemo(() => [
+    { value: 'auto', label: sensors.length > 0 ? t('controlPanel.options.sensor.autoRecommended') : t('controlPanel.options.sensor.auto') },
+    ...sensors.map((sensor) => ({ value: sensor.key, label: `${sensor.name} (${sensor.value}°C)` })),
+  ], [sensors, t, i18n.language]);
+  return (
+    <Select
+      value={value}
+      onChange={onChange}
+      options={options}
+      size="sm"
+      className="w-full min-w-0"
+      disabled={disabled}
+    />
+  );
+});
+
+const LiveBaselineTemperatureText = memo(function LiveBaselineTemperatureText({ channel }: { channel: 'cpu' | 'gpu' }) {
+  const { t } = useTranslation();
+  const temp = useAppStore((state) => (channel === 'cpu' ? state.temperature?.cpuTemp : state.temperature?.gpuTemp));
+  if (temp && temp > 0) return <>{t('controlPanel.fan.currentBaselineTemperature', { temperature: temp })}</>;
+  return <>{channel === 'cpu' ? t('controlPanel.fan.noCpuTemperatureData') : t('controlPanel.fan.noGpuTemperatureData')}</>;
+});
+
+const LiveControlSourceText = memo(function LiveControlSourceText() {
+  const { t } = useTranslation();
+  const controlTemp = useAppStore((state) => state.temperature?.controlTemp);
+  const controlSource = useAppStore((state) => state.temperature?.controlSource);
+  return (
+    <>
+      {controlTemp && controlTemp > 0
+        ? t('controlPanel.fan.currentControlSource', { source: translateControlSource(controlSource, t), temperature: controlTemp })
+        : t('controlPanel.fan.noControlTemperature')}
+    </>
+  );
+});
+
+const LiveSmartTempText = memo(function LiveSmartTempText() {
+  const { t } = useTranslation();
+  const current = useAppStore((state) => Math.max(state.temperature?.cpuTemp || 0, state.temperature?.gpuTemp || 0));
+  return <>{current > 0 ? t('controlPanel.light.smartTemp.liveTemp', { temp: current }) : t('controlPanel.light.smartTemp.noTemp')}</>;
+});
+
 /* ── Main ControlPanel ── */
 
-function ControlPanel({ config, onConfigChange, isConnected, temperature, legionFnQSupported, deviceModel, deviceSettings }: ControlPanelProps) {
+function ControlPanel({ config, onConfigChange, isConnected, legionFnQSupported, deviceModel, deviceSettings }: ControlPanelProps) {
   const { t } = useTranslation();
   const { locale, setLocale } = useLocale();
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
@@ -737,25 +857,24 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   // 自适应学习 2.0 不查用户曲线，曲线方案切换在它开启期间是空操作。
   const isBs1 = deviceModel === 'BS1';
   const currentTempSource = (((config as any).tempSource as string) || 'max') as 'max' | 'cpu' | 'gpu';
-  const cpuSensors = useMemo(() => (Array.isArray(temperature?.cpuSensors) ? temperature.cpuSensors : []), [temperature?.cpuSensors]);
-  const gpuSensors = useMemo(() => (Array.isArray(temperature?.gpuSensors) ? temperature.gpuSensors : []), [temperature?.gpuSensors]);
-  // 收窄依赖：旧实现依赖整个 temperature 对象，温度每秒推送都会重算并产生新数组引用，
-  // 导致下游 Select 等组件无谓重渲染。改为只依赖具体字段。
-  const rawGpuDevices = (temperature as any)?.gpuDevices;
-  const gpuDevices = useMemo(
-    () => (Array.isArray(rawGpuDevices) ? (rawGpuDevices as types.TemperatureGPUDevice[]) : []),
-    [rawGpuDevices],
+  const temperatureSignature = useAppStore(selectControlTemperatureSignature);
+  const temperature = useMemo<ControlTemperatureMeta | null>(
+    () => (temperatureSignature ? JSON.parse(temperatureSignature) : null),
+    [temperatureSignature],
   );
+  const cpuSensors = useMemo(() => temperature?.cpuSensors ?? [], [temperature]);
+  const gpuSensors = useMemo(() => temperature?.gpuSensors ?? [], [temperature]);
+  const gpuDevices = useMemo(() => temperature?.gpuDevices ?? [], [temperature]);
   const selectedGpuDevice = useMemo(() => {
     const configured = (((config as any).gpuDevice as string) || 'auto');
     return configured === 'auto' || gpuDevices.some((device) => device.key === configured) ? configured : 'auto';
   }, [config, gpuDevices]);
-  const detectedGpuDevice = (temperature as any)?.selectedGpuDevice;
+  const detectedGpuDevice = temperature?.selectedGpuDevice;
   const activeGpuDeviceKey = useMemo(() => {
     if (selectedGpuDevice !== 'auto') {
       return selectedGpuDevice;
     }
-    const detected = (detectedGpuDevice as string) || 'auto';
+    const detected = detectedGpuDevice || 'auto';
     return gpuDevices.some((device) => device.key === detected) ? detected : 'auto';
   }, [selectedGpuDevice, detectedGpuDevice, gpuDevices]);
   const activeGpuDevice = useMemo(() => {
@@ -1649,11 +1768,6 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     })),
   ], [gpuDevices, locale, t]);
 
-  const gpuSensorOptions = useMemo(() => [
-    { value: 'auto', label: effectiveGpuSensors.length > 0 ? t('controlPanel.options.sensor.autoRecommended') : t('controlPanel.options.sensor.auto') },
-    ...effectiveGpuSensors.map((sensor) => ({ value: sensor.key, label: `${sensor.name} (${sensor.value}°C)` })),
-  ], [effectiveGpuSensors, locale, t]);
-
   const requiredColorCount = getRequiredColorCount(lightStripConfig.mode);
 
   /* ── 智能温控灯效的温度区间 ── */
@@ -1662,7 +1776,6 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     [lightStripConfig.smartTempBands],
   );
   const smartTempHysteresis = lightStripConfig.smartTempHysteresis ?? 2;
-  const smartTempCurrent = Math.max(temperature?.cpuTemp || 0, temperature?.gpuTemp || 0);
   // 预设 5 的颜色表由设备的运行配置字节（命令 0x09）决定，读不到时按固件复位默认值 0 处理。
   const runtimeProfile = deviceSettings?.runtimeProfileRaw ?? null;
   const smartTempPresets = useMemo(() => smartTempPresetOptions(runtimeProfile), [runtimeProfile]);
@@ -1672,15 +1785,22 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
     [smartTempPresets, locale, t],
   );
 
-  // 优先用核心上报的真实状态（它带着回差历史）；核心还没上报时按当前温度预览。
+  // 核心还没上报时按当前温度预览。只在智能温控模式下订阅温度，且选择器直接给出命中的
+  // 区间下标：温度在同一区间里波动不会重渲染整页。
+  const previewSmartBandIndex = useAppStore((state) => {
+    if (lightStripConfig.mode !== 'smart_temp') return -1;
+    const current = Math.max(state.temperature?.cpuTemp || 0, state.temperature?.gpuTemp || 0);
+    if (current <= 0) return -1;
+    return selectSmartTempBand(smartTempBands, smartTempHysteresis, current, -1);
+  });
+  // 优先用核心上报的真实状态（它带着回差历史）。
   const activeSmartBandIndex = useMemo(() => {
     if (lightStripConfig.mode !== 'smart_temp') return -1;
     if (smartLightStatus?.active && smartLightStatus.bandIndex >= 0 && smartLightStatus.bandIndex < smartTempBands.length) {
       return smartLightStatus.bandIndex;
     }
-    if (smartTempCurrent <= 0) return -1;
-    return selectSmartTempBand(smartTempBands, smartTempHysteresis, smartTempCurrent, -1);
-  }, [lightStripConfig.mode, smartLightStatus, smartTempBands, smartTempHysteresis, smartTempCurrent]);
+    return previewSmartBandIndex;
+  }, [lightStripConfig.mode, smartLightStatus, smartTempBands, previewSmartBandIndex]);
 
   useEffect(() => {
     if (lightStripConfig.mode !== 'smart_temp') return;
@@ -1963,9 +2083,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-medium text-foreground">{t('controlPanel.light.smartTemp.bandsTitle')}</span>
                     <span className="text-xs text-muted-foreground">
-                      {smartTempCurrent > 0
-                        ? t('controlPanel.light.smartTemp.liveTemp', { temp: smartTempCurrent })
-                        : t('controlPanel.light.smartTemp.noTemp')}
+                      <LiveSmartTempText />
                     </span>
                   </div>
 
@@ -2202,10 +2320,9 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
                       label={t('controlPanel.fan.temperatureSensorMulti')}
                       hint={t('controlPanel.fan.temperatureSensorMultiHint')}
                     >
-                      <MultiSelect
+                      <LiveCpuSensorMultiSelect
                         values={selectedCpuSensors}
                         onChange={(values) => void handleCpuSensorsChange(values)}
-                        options={cpuSensors.map((sensor) => ({ value: sensor.key, label: `${sensor.name} (${sensor.value}°C)` }))}
                         autoOptionLabel={t('controlPanel.options.sensor.auto')}
                         emptyLabel={cpuSensors.length > 0 ? t('controlPanel.options.sensor.autoRecommended') : t('controlPanel.options.sensor.auto')}
                         disabled={!cpuSensors.length || loadingStates.cpuSensors}
@@ -2215,7 +2332,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
                     </SelectionField>
                   </div>
                   <div className="mt-2 text-xs text-muted-foreground">
-                    {temperature?.cpuTemp && temperature.cpuTemp > 0 ? t('controlPanel.fan.currentBaselineTemperature', { temperature: temperature.cpuTemp }) : t('controlPanel.fan.noCpuTemperatureData')}
+                    <LiveBaselineTemperatureText channel="cpu" />
                   </div>
                 </div>
 
@@ -2255,26 +2372,22 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
                     </SelectionField>
 
                     <SelectionField label={t('controlPanel.fan.temperatureSensor')}>
-                      <Select
+                      <LiveGpuSensorSelect
+                        activeGpuDeviceKey={activeGpuDeviceKey}
                         value={selectedGpuSensor}
-                        onChange={(value: string | number) => handleTempSensorChange('gpu', String(value))}
-                        options={gpuSensorOptions}
-                        size="sm"
-                        className="w-full min-w-0"
+                        onChange={(value: string) => handleTempSensorChange('gpu', value)}
                         disabled={!effectiveGpuSensors.length}
                       />
                     </SelectionField>
                   </div>
                   <div className="mt-2 text-xs text-muted-foreground">
-                    {temperature?.gpuTemp && temperature.gpuTemp > 0 ? t('controlPanel.fan.currentBaselineTemperature', { temperature: temperature.gpuTemp }) : t('controlPanel.fan.noGpuTemperatureData')}
+                    <LiveBaselineTemperatureText channel="gpu" />
                   </div>
                 </div>
               </div>
 
               <div className="mt-3 text-xs text-muted-foreground">
-                {temperature?.controlTemp && temperature.controlTemp > 0
-                  ? t('controlPanel.fan.currentControlSource', { source: translateControlSource(temperature.controlSource, t), temperature: temperature.controlTemp })
-                  : t('controlPanel.fan.noControlTemperature')}
+                <LiveControlSourceText />
               </div>
             </div>
           </div>
@@ -3243,5 +3356,5 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   );
 }
 
-// 只随真实的 props 变化重渲染；温度约 2 秒一次，转速推送已由 ControlOverview 自行消化。
+// 只随真实的 props 与传感器清单签名变化重渲染；实时转速、温度读数都由各自的小组件订阅。
 export default memo(ControlPanel);

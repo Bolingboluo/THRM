@@ -1,10 +1,9 @@
 'use client';
 
-import { useCallback, useMemo, type ComponentProps } from 'react';
+import { useCallback, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import * as types from '@go/types';
 import { useShallow } from 'zustand/react/shallow';
-import type { ControlPanelTemperature } from './components/ControlPanel';
 import AppFatalError from './components/AppFatalError';
 import AppLoadingSkeleton from './components/AppLoadingSkeleton';
 import AppShell from './components/AppShell';
@@ -22,33 +21,7 @@ const AboutPanel = dynamic(() => import('./components/AboutPanel'), { ssr: false
 
 // 遥测（fanData 每秒最多 4 次、temperature 约 2 秒一次）只在用得到的标签页里订阅，
 // 不放进 Home 的 selector：否则每次推送都会让 Home → AppShell → 整个标签页一起重渲染。
-// 首页与曲线页在组件内部按需订阅各自显示的数值，整页只随这些数值之外的慢变化重渲染。
-
-const selectControlTemperature = (
-  state: ReturnType<typeof useAppStore.getState>,
-): ControlPanelTemperature | null => {
-  const temperature = state.temperature;
-  if (!temperature) return null;
-  return {
-    cpuTemp: temperature.cpuTemp,
-    gpuTemp: temperature.gpuTemp,
-    cpuModel: temperature.cpuModel,
-    gpuModel: temperature.gpuModel,
-    controlTemp: temperature.controlTemp,
-    controlSource: temperature.controlSource,
-    cpuSensors: temperature.cpuSensors,
-    gpuSensors: temperature.gpuSensors,
-    gpuDevices: temperature.gpuDevices,
-    selectedGpuDevice: temperature.selectedGpuDevice,
-  };
-};
-
-// 设置页的转速概览由 ControlPanel 内部自行订阅，这里只挑出它读到的温度字段做浅比较：
-// 每次推送都是新对象，但这些字段（传感器清单由 store 复用旧引用）常常一个都没变。
-function ControlTab(props: Omit<ComponentProps<typeof ControlPanel>, 'temperature'>) {
-  const temperature = useAppStore(useShallow(selectControlTemperature));
-  return <ControlPanel {...props} temperature={temperature} />;
-}
+// 三个标签页都在组件内部按需订阅各自显示的数值，整页只随这些数值之外的慢变化重渲染。
 
 export default function Home() {
   useAppBootstrap();
@@ -139,7 +112,7 @@ export default function Home() {
         />
       }
       controlContent={
-        <ControlTab
+        <ControlPanel
           config={safeConfig}
           onConfigChange={setConfig}
           isConnected={view.isConnected}

@@ -42,10 +42,13 @@ export function FirmwareUpdatePanel({ open, onOpenChange, t }: Props) {
   }, []);
 
   // 打开时拉状态，并每 2 秒轮询（用于检测进入下载模式）。
+  // 窗口隐藏时跳过：没人看着，重新可见后下一次轮询就会补上。
   useEffect(() => {
     if (!open) return;
     refreshStatus();
-    const id = setInterval(refreshStatus, 2000);
+    const id = setInterval(() => {
+      if (!document.hidden) refreshStatus();
+    }, 2000);
     return () => clearInterval(id);
   }, [open, refreshStatus]);
 

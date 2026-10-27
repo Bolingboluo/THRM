@@ -843,7 +843,7 @@ export default function AppShell({
                 animate="center"
                 exit="exit"
                 data-page-reveal="cards"
-                className="w-full min-w-0 px-1 pb-2 will-change-transform"
+                className="w-full min-w-0 px-1 pb-2"
               >
                 {contentMap[activeTab]}
               </motion.div>

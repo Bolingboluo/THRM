@@ -385,22 +385,30 @@ type HistoryNumericField = 'cpuTemp' | 'gpuTemp' | 'fanRpm' | 'cpuFanRpm' | 'gpu
 const HISTORY_RAW_CAP = 1500;
 
 type PositiveStats = { peak: number; sum: number; count: number };
+type HistoryStats = Record<HistoryNumericField, PositiveStats> & { tempLowest: number };
 
-// 单遍统计某一字段的有效（> 0）样本：峰值、累加和、个数。
-// 累加顺序与逐点 reduce 相同，平均值逐位一致。
-function positiveStats(points: TemperatureHistoryPoint[], field: HistoryNumericField): PositiveStats {
-  let peak = 0;
-  let sum = 0;
-  let count = 0;
+const HISTORY_NUMERIC_FIELDS: HistoryNumericField[] = ['cpuTemp', 'gpuTemp', 'fanRpm', 'cpuFanRpm', 'gpuFanRpm', 'cpuPower', 'gpuPower'];
+
+// 一遍扫完所有字段的有效（> 0）样本：峰值、累加和、个数，外加 CPU/GPU 温度的最低值。
+// 24 小时窗口约 1.7 万点、每 5 秒一次，原先每个字段各扫一遍。
+// 每个字段的累加顺序仍与逐点 reduce 相同，平均值逐位一致。
+function summarizeHistoryPoints(points: TemperatureHistoryPoint[]): HistoryStats {
+  const stats = { tempLowest: Infinity } as HistoryStats;
+  for (const field of HISTORY_NUMERIC_FIELDS) stats[field] = { peak: 0, sum: 0, count: 0 };
   for (const point of points) {
-    const value = point[field];
-    if (value > 0) {
-      if (value > peak) peak = value;
-      sum += value;
-      count++;
+    for (const field of HISTORY_NUMERIC_FIELDS) {
+      const value = point[field];
+      if (value > 0) {
+        const entry = stats[field];
+        if (value > entry.peak) entry.peak = value;
+        entry.sum += value;
+        entry.count++;
+      }
     }
+    if (point.cpuTemp > 0 && point.cpuTemp < stats.tempLowest) stats.tempLowest = point.cpuTemp;
+    if (point.gpuTemp > 0 && point.gpuTemp < stats.tempLowest) stats.tempLowest = point.gpuTemp;
   }
-  return { peak, sum, count };
+  return stats;
 }
 
 // 时间轴标记最多同屏显示的条数：错行布局只有 4 行，再多就互相压字看不清了。
@@ -483,38 +491,89 @@ function formatHistoryDuration(
 
 /* ── Temperature indicator overlay (memo, doesn't re-render chart) ── */
 
+type CurveTempSource = 'max' | 'cpu' | 'gpu';
+
+// 参考温度跟随设置页"控温温度来源"(max/cpu/gpu)，该路无读数时回退到综合最高温。
+const getCurveReferenceTemp = (temperature: types.TemperatureData | null, tempSource: CurveTempSource) => {
+  if (!temperature) return null;
+  const cpu = temperature.cpuTemp ?? 0;
+  const gpu = temperature.gpuTemp ?? 0;
+  const max = temperature.maxTemp ?? 0;
+  if (tempSource === 'cpu') return cpu > 0 ? cpu : (max > 0 ? max : null);
+  if (tempSource === 'gpu') return gpu > 0 ? gpu : (max > 0 ? max : null);
+  return max > 0 ? max : null;
+};
+
+type IndicatorGeometry = { left: number; top: number; width: number; height: number };
+
 const TemperatureIndicator = memo(function TemperatureIndicator({
-  temperature,
+  tempSource,
   chartRef,
   temperatureRange,
 }: {
-  temperature: number | null;
+  tempSource: CurveTempSource;
   chartRef: React.RefObject<HTMLDivElement | null>;
   temperatureRange: { min: number; max: number };
 }) {
   const { t } = useTranslation();
-  const [position, setPosition] = useState<{ x: number; top: number; height: number } | null>(null);
+  // 参考温度在这里订阅：只有这条指示线随温度变化重渲染，曲线页主体不动。
+  const temperature = useAppStore((state) => getCurveReferenceTemp(state.temperature, tempSource));
+  // 网格区域相对图表容器的位置记在状态里，温度变化时只做一次换算。测量一律推迟到下一帧之后：
+  // 那时页面已完成布局，读几何不会强制同步布局。
+  const [geometry, setGeometry] = useState<IndicatorGeometry | null>(null);
+  const measureRef = useRef<() => void>(() => {});
 
   useEffect(() => {
-    if (temperature === null || !chartRef.current) { setPosition(null); return; }
-    const updatePosition = () => {
-      const chartArea = chartRef.current?.querySelector('.recharts-cartesian-grid');
-      if (!chartArea) return;
-      const rect = chartArea.getBoundingClientRect();
-      const containerRect = chartRef.current!.querySelector('.recharts-responsive-container')?.getBoundingClientRect();
-      if (!containerRect) return;
-      const chartWidth = rect.width;
-      const chartLeft = rect.left - containerRect.left;
-      const tempPercent = (temperature - temperatureRange.min) / (temperatureRange.max - temperatureRange.min);
-      const x = chartLeft + tempPercent * chartWidth;
-      setPosition({ x, top: rect.top - containerRect.top, height: rect.height });
+    const chart = chartRef.current;
+    if (!chart) return;
+    // recharts 的自适应容器在外层尺寸变化后才重绘网格，ResizeObserver 回调时网格往往还是旧的；
+    // 只在回调里测会把旧尺寸缓存下来（改窗口大小后指示线错位、变短且不会自行恢复）。
+    // 所以回调里只排期，隔两帧等重绘完成再测；温度变化时也会排期一次，兜住重绘更晚的情况。
+    let wrapper: Element | null = null;
+    let frame = 0;
+    const measure = () => {
+      const nextWrapper = chart.querySelector('.recharts-wrapper');
+      if (nextWrapper !== wrapper) {
+        if (wrapper) observer.unobserve(wrapper);
+        wrapper = nextWrapper;
+        if (wrapper) observer.observe(wrapper);
+      }
+      const grid = chart.querySelector('.recharts-cartesian-grid');
+      const container = chart.querySelector('.recharts-responsive-container');
+      if (!grid || !container) return;
+      const rect = grid.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const next = { left: rect.left - containerRect.left, top: rect.top - containerRect.top, width: rect.width, height: rect.height };
+      setGeometry((prev) => (
+        prev && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height ? prev : next
+      ));
     };
-    updatePosition();
-    window.addEventListener('resize', updatePosition);
-    return () => window.removeEventListener('resize', updatePosition);
-  }, [temperature, chartRef, temperatureRange]);
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(measure);
+      });
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(chart);
+    measureRef.current = schedule;
+    schedule();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      measureRef.current = () => {};
+    };
+  }, [chartRef]);
 
-  if (!position || temperature === null) return null;
+  // 温度变化时补测一次（推迟到帧后，几何没变时 setGeometry 原样返回，不会多渲染）。
+  useEffect(() => {
+    if (temperature !== null) measureRef.current();
+  }, [temperature]);
+
+  if (!geometry || temperature === null) return null;
+
+  const tempPercent = (temperature - temperatureRange.min) / (temperatureRange.max - temperatureRange.min);
+  const position = { x: geometry.left + tempPercent * geometry.width, top: geometry.top, height: geometry.height };
 
   return (
     <svg className="absolute inset-0 pointer-events-none overflow-visible" style={{ width: '100%', height: '100%' }}>
@@ -798,6 +857,351 @@ const HistoryPowerChart = memo(function HistoryPowerChart({
   );
 });
 
+/* ── 历史趋势 ──
+
+历史每 5 秒追加一个点，24 小时窗口下统计要扫约 1.7 万点。整段（订阅、缩放、统计、两张图）
+放进独立组件：新点到达只重渲染这一节，曲线编辑器、方案、对话框都不跟着动。 */
+
+const HistoryDetailsSection = memo(function HistoryDetailsSection({
+  sectionRef,
+  timelineEvents,
+}: {
+  sectionRef: React.RefObject<HTMLElement | null>;
+  timelineEvents: TimelineEvent[];
+}) {
+  const { t } = useTranslation();
+  const { locale } = useLocale();
+  const [historySeriesVisibility, setHistorySeriesVisibility] = useState<Record<HistorySeriesKey, boolean>>({
+    cpu: true,
+    gpu: true,
+    fan: true,
+    cpuFan: true,
+    gpuFan: true,
+    cpuPower: true,
+    gpuPower: true,
+  });
+  const {
+    points: temperatureHistory,
+    enabled: temperatureHistoryEnabled,
+    saving: temperatureHistorySaving,
+    setEnabled: setTemperatureHistoryEnabled,
+    retentionHours: historyRetentionHours,
+    setRetentionHours: setHistoryRetentionHours,
+  } = useTemperatureHistory();
+
+  // 保留时长可配置（最多 24h），全窗口用于域计算与汇总；实际渲染点数由下方降采样控制。
+  const historyStats = useMemo(() => summarizeHistoryPoints(temperatureHistory), [temperatureHistory]);
+
+  const historyTempDomain = useMemo<[number, number]>(() => {
+    const { cpuTemp, gpuTemp, tempLowest } = historyStats;
+    if (cpuTemp.count + gpuTemp.count === 0) {
+      return [30, 90];
+    }
+    const highest = Math.max(cpuTemp.peak, gpuTemp.peak);
+    const min = Math.max(0, Math.floor((tempLowest - 4) / 5) * 5);
+    const max = Math.min(110, Math.ceil((highest + 4) / 5) * 5);
+    return [min, Math.max(min + 10, max)];
+  }, [historyStats]);
+
+  // 上取整到 500 的整数倍，让右轴刻度落在整齐数值（如 4500）而非原始峰值 4114。
+  const historyFanPeak = Math.max(historyStats.fanRpm.peak, historyStats.cpuFanRpm.peak, historyStats.gpuFanRpm.peak);
+  const historyFanMax = Math.max(4000, Math.ceil((historyFanPeak + 200) / 500) * 500);
+
+  // 笔记本内置风扇转速仅部分机型（Uniwill/同方准系统）可读；无任何有效样本时整组曲线与图例隐藏。
+  const hasLaptopFanHistory = historyStats.cpuFanRpm.count > 0 || historyStats.gpuFanRpm.count > 0;
+
+  const historyPowerPeak = Math.max(historyStats.cpuPower.peak, historyStats.gpuPower.peak);
+  const historyPowerMax = historyPowerPeak <= 0 ? 0 : Math.max(20, Math.ceil((historyPowerPeak + 10) / 10) * 10);
+
+  const historySummary = useMemo(() => {
+    const latest = temperatureHistory[temperatureHistory.length - 1] ?? null;
+    const first = temperatureHistory[0] ?? null;
+    const { cpuTemp: cpu, gpuTemp: gpu, cpuPower, gpuPower, fanRpm: fan } = historyStats;
+    const average = (stats: PositiveStats) => stats.count > 0 ? Math.round(stats.sum / stats.count) : 0;
+    const averagePower = (stats: PositiveStats) => stats.count > 0 ? Math.round(stats.sum / stats.count * 10) / 10 : 0;
+
+    return {
+      sampleCount: temperatureHistory.length,
+      latest,
+      latestLabel: latest ? formatHistoryDateTime(latest.timestamp, locale) : '--',
+      durationLabel: first && latest ? formatHistoryDuration(first.timestamp, latest.timestamp, t) : '--',
+      cpuPeak: cpu.peak,
+      cpuAverage: average(cpu),
+      gpuPeak: gpu.peak,
+      gpuAverage: average(gpu),
+      cpuPowerPeak: cpuPower.peak,
+      cpuPowerAverage: averagePower(cpuPower),
+      gpuPowerPeak: gpuPower.peak,
+      gpuPowerAverage: averagePower(gpuPower),
+      fanPeak: fan.peak,
+      fanAverage: average(fan),
+    };
+  }, [historyStats, locale, t, temperatureHistory]);
+  const historyChartData = temperatureHistory;
+  // 趋势图缩放区间（时间戳范围）；null 表示未缩放（跟随全部数据）。
+  const [historyZoomDomain, setHistoryZoomDomain] = useState<[number, number] | null>(null);
+  // 正在拖拽框选的临时区间，用于渲染半透明选区。
+  const [historyZoomSelect, setHistoryZoomSelect] = useState<{ start: number; end: number } | null>(null);
+  // 最近趋势 / 功耗趋势共用同一份裁切数据，天然保持缩放与指针联动。
+  const zoomedHistoryChartData = useMemo(() => {
+    if (!historyZoomDomain) return historyChartData;
+    const [from, to] = historyZoomDomain;
+    const sliced = historyChartData.filter((point) => point.timestamp >= from && point.timestamp <= to);
+    return sliced.length >= 2 ? sliced : historyChartData;
+  }, [historyChartData, historyZoomDomain]);
+  // 渲染用数据：对可见窗口等距抽稀到上限点数。两图共用同一份，保持缩放与指针联动。
+  //
+  // 抽稀之后再找中断：抽稀本身会把相邻点的间隔按 stride 等比拉大，用原始数据的阈值
+  // 会把每一段都判成中断；改用抽稀后自身的节奏做判据，缩放到哪一级就用哪一级的尺度。
+  const { historyDisplayData, historyGaps } = useMemo(() => {
+    const sampled = downsampleHistoryPoints(zoomedHistoryChartData, HISTORY_RAW_CAP);
+    const gaps = findHistoryGaps(sampled, historyGapThresholdMs(sampled));
+    return { historyDisplayData: insertHistoryGapBreaks(sampled, gaps), historyGaps: gaps };
+  }, [zoomedHistoryChartData]);
+  const handleHistoryZoomMouseDown = useCallback((state: { activeLabel?: string | number } | null) => {
+    if (state?.activeLabel == null) return;
+    const ts = Number(state.activeLabel);
+    setHistoryZoomSelect({ start: ts, end: ts });
+  }, []);
+  const handleHistoryZoomMouseMove = useCallback((state: { activeLabel?: string | number } | null) => {
+    if (state?.activeLabel == null) return;
+    const ts = Number(state.activeLabel);
+    setHistoryZoomSelect((prev) => (prev ? { ...prev, end: ts } : prev));
+  }, []);
+  const handleHistoryZoomMouseUp = useCallback(() => {
+    setHistoryZoomSelect((prev) => {
+      if (prev) {
+        const from = Math.min(prev.start, prev.end);
+        const to = Math.max(prev.start, prev.end);
+        // 选区过窄（不足两个采样点）视为误触，忽略。
+        if (historyChartData.filter((point) => point.timestamp >= from && point.timestamp <= to).length >= 2) {
+          setHistoryZoomDomain([from, to]);
+        }
+      }
+      return null;
+    });
+  }, [historyChartData]);
+  const resetHistoryZoom = useCallback(() => {
+    setHistoryZoomSelect(null);
+    setHistoryZoomDomain(null);
+  }, []);
+  const visibleTimelineEvents = useMemo(() => {
+    const first = zoomedHistoryChartData[0]?.timestamp ?? 0;
+    const last = zoomedHistoryChartData[zoomedHistoryChartData.length - 1]?.timestamp ?? Number.MAX_SAFE_INTEGER;
+    const inWindow = timelineEvents.filter((event) => event.timestamp >= first && event.timestamp <= last);
+    if (inWindow.length <= TIMELINE_MARKER_CAP) return inWindow;
+    // 超出可读上限时按重要性取舍，而不是简单地留最近的几条：断连和睡眠唤醒才是
+    // 用户找的东西，几小时前的一次断连不该被后来一串"切换曲线方案"挤掉。
+    return inWindow
+      .map((event, index) => ({ event, index }))
+      .sort((a, b) => (TIMELINE_MARKER_PRIORITY[b.event.type] - TIMELINE_MARKER_PRIORITY[a.event.type]) || (b.index - a.index))
+      .slice(0, TIMELINE_MARKER_CAP)
+      .sort((a, b) => a.index - b.index)
+      .map(({ event }) => event);
+  }, [zoomedHistoryChartData, timelineEvents]);
+  // 为聚集在一起的时间线标记分配垂直行号，避免各条参考线的文字标签叠在同一处；
+  // 同时按标记在时间轴的位置决定文字朝向，防止靠右的标记文字溢出图表。
+  const timelineEventLayout = useMemo(() => {
+    const first = zoomedHistoryChartData[0]?.timestamp ?? 0;
+    const last = zoomedHistoryChartData[zoomedHistoryChartData.length - 1]?.timestamp ?? first;
+    const range = Math.max(1, last - first);
+    const minGap = range * 0.07; // 时间间隔小于可见跨度 7% 的标记视为“重叠”，需错行显示
+    const maxRows = 4;
+    const rowLastTs: number[] = [];
+    return visibleTimelineEvents.map((event) => {
+      let row = rowLastTs.findIndex((ts) => event.timestamp - ts >= minGap);
+      if (row === -1) {
+        row = rowLastTs.length < maxRows
+          ? rowLastTs.length
+          : rowLastTs.reduce((best, ts, i) => (ts < rowLastTs[best] ? i : best), 0);
+      }
+      rowLastTs[row] = event.timestamp;
+      return { event, row, anchorEnd: (event.timestamp - first) / range > 0.55 };
+    });
+  }, [zoomedHistoryChartData, visibleTimelineEvents]);
+
+  const historySeriesMeta = useMemo(() => ([
+    { key: 'cpu' as const, label: t('fanCurve.history.series.cpu'), color: '#2f6df6' },
+    { key: 'gpu' as const, label: t('fanCurve.history.series.gpu'), color: '#f97316' },
+    { key: 'fan' as const, label: t('fanCurve.history.series.fan'), color: '#10b981' },
+    ...(hasLaptopFanHistory ? [
+      { key: 'cpuFan' as const, label: t('fanCurve.history.series.cpuFan'), color: '#0ea5e9' },
+      { key: 'gpuFan' as const, label: t('fanCurve.history.series.gpuFan'), color: '#84cc16' },
+    ] : []),
+    { key: 'cpuPower' as const, label: t('fanCurve.history.series.cpuPower'), color: '#8b5cf6' },
+    { key: 'gpuPower' as const, label: t('fanCurve.history.series.gpuPower'), color: '#ec4899' },
+  ]), [t, locale, hasLaptopFanHistory]);
+
+  const toggleHistorySeries = useCallback((series: HistorySeriesKey) => {
+    setHistorySeriesVisibility((prev) => ({
+      ...prev,
+      [series]: !prev[series],
+    }));
+  }, []);
+
+  const tempChartSeries = useMemo<HistoryLineSpec[]>(() => ([
+    { key: 'cpu', dataKey: 'cpuTemp', axis: 'temp', color: '#2f6df6', width: 2.2 },
+    { key: 'gpu', dataKey: 'gpuTemp', axis: 'temp', color: '#f97316', width: 2.2 },
+    { key: 'fan', dataKey: 'fanRpm', axis: 'fan', color: '#10b981', width: 2 },
+    ...(hasLaptopFanHistory ? [
+      { key: 'cpuFan' as const, dataKey: 'cpuFanRpm' as const, axis: 'fan', color: '#0ea5e9', width: 1.4, dash: '5 4' },
+      { key: 'gpuFan' as const, dataKey: 'gpuFanRpm' as const, axis: 'fan', color: '#84cc16', width: 1.4, dash: '5 4' },
+    ] : []),
+  ]), [hasLaptopFanHistory]);
+  const powerChartSeries = useMemo<HistoryLineSpec[]>(() => ([
+    { key: 'cpuPower', dataKey: 'cpuPower', axis: 'power', color: '#8b5cf6', width: 2.2 },
+    { key: 'gpuPower', dataKey: 'gpuPower', axis: 'power', color: '#ec4899', width: 2.2 },
+  ]), []);
+  const tempChartKeys = useMemo<HistorySeriesKey[]>(() => tempChartSeries.map((s) => s.key), [tempChartSeries]);
+  const powerChartKeys = useMemo<HistorySeriesKey[]>(() => powerChartSeries.map((s) => s.key), [powerChartSeries]);
+
+  return (
+    <section ref={sectionRef} className="rounded-2xl border border-border/70 bg-card p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <History className="h-4 w-4 text-primary" />
+          <div>
+            <div className="text-sm font-medium text-foreground">{t('fanCurve.history.detailsTitle')}</div>
+            <div className="text-xs text-muted-foreground">{t('fanCurve.history.detailsDescription')}</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <ToggleSwitch
+            enabled={temperatureHistoryEnabled}
+            onChange={setTemperatureHistoryEnabled}
+            loading={temperatureHistorySaving}
+            label={temperatureHistorySaving ? t('fanCurve.history.saving') : t('fanCurve.history.backgroundRecording')}
+            size="sm"
+            color="blue"
+          />
+        </div>
+      </div>
+
+      {temperatureHistory.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border/70 bg-background/35 px-4 py-8 text-center text-sm text-muted-foreground">
+          {temperatureHistoryEnabled ? t('fanCurve.history.emptyEnabled') : t('fanCurve.history.emptyDisabled')}
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
+            {[
+              [t('fanCurve.history.summary.cpuPeak'), historySummary.cpuPeak ? `${historySummary.cpuPeak}°C` : '--', historySummary.cpuAverage ? t('fanCurve.history.summary.averageTemperature', { value: historySummary.cpuAverage }) : t('fanCurve.history.summary.noCpuTemperature')],
+              [t('fanCurve.history.summary.gpuPeak'), historySummary.gpuPeak ? `${historySummary.gpuPeak}°C` : '--', historySummary.gpuAverage ? t('fanCurve.history.summary.averageTemperature', { value: historySummary.gpuAverage }) : t('fanCurve.history.summary.noGpuTemperature')],
+              [t('fanCurve.history.summary.cpuPowerPeak'), historySummary.cpuPowerPeak ? `${historySummary.cpuPowerPeak.toFixed(1)} W` : '--', historySummary.cpuPowerAverage ? t('fanCurve.history.summary.averagePower', { value: historySummary.cpuPowerAverage.toFixed(1) }) : t('fanCurve.history.summary.noCpuPower')],
+              [t('fanCurve.history.summary.gpuPowerPeak'), historySummary.gpuPowerPeak ? `${historySummary.gpuPowerPeak.toFixed(1)} W` : '--', historySummary.gpuPowerAverage ? t('fanCurve.history.summary.averagePower', { value: historySummary.gpuPowerAverage.toFixed(1) }) : t('fanCurve.history.summary.noGpuPower')],
+              [t('fanCurve.history.summary.fanPeak'), historySummary.fanPeak ? `${historySummary.fanPeak} RPM` : '--', historySummary.fanAverage ? t('fanCurve.history.summary.averageFan', { value: historySummary.fanAverage }) : t('fanCurve.history.summary.noFanData')],
+            ].map(([label, value, hint]) => (
+              <div key={label} className="min-w-0 rounded-xl border border-border/70 bg-background/35 p-2.5">
+                <div className="truncate text-[11px] text-muted-foreground" title={label}>{label}</div>
+                <div className="mt-1 truncate text-sm font-semibold text-foreground" title={value}>{value}</div>
+                <div className="mt-1 truncate text-[11px] text-muted-foreground" title={hint}>{hint}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-xl border border-border/70 bg-background/35 p-3 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-xs font-medium text-muted-foreground">{t('fanCurve.history.recentTrend')}</div>
+                {historyZoomDomain ? (
+                  <button
+                    type="button"
+                    onClick={resetHistoryZoom}
+                    className="cursor-pointer rounded-full border border-border/70 bg-card px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {t('fanCurve.history.resetZoom')}
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground/60">{t('fanCurve.history.zoomHint')}</span>
+                )}
+                <span className="mx-0.5 h-3 w-px bg-border/70" />
+                <span className="text-[11px] text-muted-foreground">{t('fanCurve.history.retention.label')}</span>
+                <Select
+                  value={historyRetentionHours}
+                  onChange={(value) => { void setHistoryRetentionHours(Number(value)); }}
+                  disabled={temperatureHistorySaving}
+                  size="sm"
+                  className="min-w-23"
+                  triggerClassName="h-7 rounded-full px-2.5 text-[11px]"
+                  options={HISTORY_RETENTION_HOUR_OPTIONS.map((hours) => ({
+                    value: hours,
+                    label: t('fanCurve.history.retention.hours', { count: hours }),
+                  }))}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {historySeriesMeta.map((series) => (
+                  <button
+                    key={series.key}
+                    type="button"
+                    onClick={() => toggleHistorySeries(series.key)}
+                    className={clsx(
+                      'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+                      historySeriesVisibility[series.key]
+                        ? 'border-border bg-card text-foreground'
+                        : 'border-border/60 bg-transparent text-muted-foreground/65',
+                    )}
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: series.color }} />
+                    {series.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {historyChartData.length < 2 ? (
+              <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">{t('fanCurve.history.waitingMoreSamples')}</div>
+            ) : (
+              <div className="h-72 select-none">
+                <HistoryTempChart
+                  data={historyDisplayData}
+                  gaps={historyGaps}
+                  series={tempChartSeries}
+                  seriesKeys={tempChartKeys}
+                  seriesMeta={historySeriesMeta}
+                  visibility={historySeriesVisibility}
+                  zoomSelection={historyZoomSelect}
+                  locale={locale}
+                  onZoomMouseDown={handleHistoryZoomMouseDown}
+                  onZoomMouseMove={handleHistoryZoomMouseMove}
+                  onZoomMouseUp={handleHistoryZoomMouseUp}
+                  onResetZoom={resetHistoryZoom}
+                  tempDomain={historyTempDomain}
+                  fanMax={historyFanMax}
+                  timelineEventLayout={timelineEventLayout}
+                />
+              </div>
+            )}
+
+            {historyPowerMax > 0 && (historySeriesVisibility.cpuPower || historySeriesVisibility.gpuPower) && (
+              <div className="border-t border-border/60 pt-3">
+                <div className="mb-2 text-xs font-medium text-muted-foreground">{t('fanCurve.history.powerTrend')}</div>
+                <div className="h-48 select-none">
+                  <HistoryPowerChart
+                    data={historyDisplayData}
+                    gaps={historyGaps}
+                    series={powerChartSeries}
+                    seriesKeys={powerChartKeys}
+                    seriesMeta={historySeriesMeta}
+                    visibility={historySeriesVisibility}
+                    zoomSelection={historyZoomSelect}
+                    locale={locale}
+                    onZoomMouseDown={handleHistoryZoomMouseDown}
+                    onZoomMouseMove={handleHistoryZoomMouseMove}
+                    onZoomMouseUp={handleHistoryZoomMouseUp}
+                    onResetZoom={resetHistoryZoom}
+                    powerMax={historyPowerMax}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+});
+
 /* ── Tooltip label helper ── */
 
 const ConfigTooltipLabel = memo(function ConfigTooltipLabel({ label, description }: { label: string; description: string }) {
@@ -880,15 +1284,6 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [isInteracting, setIsInteracting] = useState(false);
   const [showLowRpmWarning, setShowLowRpmWarning] = useState(false);
-  const [historySeriesVisibility, setHistorySeriesVisibility] = useState<Record<HistorySeriesKey, boolean>>({
-    cpu: true,
-    gpu: true,
-    fan: true,
-    cpuFan: true,
-    gpuFan: true,
-    cpuPower: true,
-    gpuPower: true,
-  });
   const chartRef = useRef<HTMLDivElement>(null);
   const curveEditorRef = useRef<HTMLDivElement>(null);
   const historyDetailsRef = useRef<HTMLElement>(null);
@@ -897,14 +1292,6 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
   const dragFrameRef = useRef<number | null>(null);
   const pendingDragYRef = useRef<number | null>(null);
   const [rpmRange, setRpmRange] = useState({ min: 0, max: 4000, ticks: [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000] });
-  const {
-    points: temperatureHistory,
-    enabled: temperatureHistoryEnabled,
-    saving: temperatureHistorySaving,
-    setEnabled: setTemperatureHistoryEnabled,
-    retentionHours: historyRetentionHours,
-    setRetentionHours: setHistoryRetentionHours,
-  } = useTemperatureHistory();
 
   const activeProfile = useMemo(() => curveProfiles.find((p) => p.id === activeProfileId) ?? null, [curveProfiles, activeProfileId]);
   const pendingDeleteProfile = useMemo(
@@ -1135,203 +1522,6 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
         temperature: sourceCurve[item.index]?.temperature,
       }));
   }, [config.fanCurve, currentLearningBias, localCurve, smartControl.learnedOffsets]);
-
-  // 保留时长可配置（最多 24h），全窗口用于域计算与汇总；实际渲染点数由下方降采样控制。
-  const detailHistoryPoints = temperatureHistory;
-
-  // 下面几项统计在 24 小时窗口下要扫 1.7 万点、每 5 秒一次：单遍循环，不再 flatMap 出
-  // 几万个临时数组再展开传给 Math.min/Math.max。
-  const historyTempDomain = useMemo<[number, number]>(() => {
-    let lowest = Infinity;
-    let highest = -Infinity;
-    for (const point of detailHistoryPoints) {
-      if (point.cpuTemp > 0) {
-        if (point.cpuTemp < lowest) lowest = point.cpuTemp;
-        if (point.cpuTemp > highest) highest = point.cpuTemp;
-      }
-      if (point.gpuTemp > 0) {
-        if (point.gpuTemp < lowest) lowest = point.gpuTemp;
-        if (point.gpuTemp > highest) highest = point.gpuTemp;
-      }
-    }
-    if (lowest === Infinity) {
-      return [30, 90];
-    }
-    const min = Math.max(0, Math.floor((lowest - 4) / 5) * 5);
-    const max = Math.min(110, Math.ceil((highest + 4) / 5) * 5);
-    return [min, Math.max(min + 10, max)];
-  }, [detailHistoryPoints]);
-
-  const historyFanMax = useMemo(() => {
-    const peak = Math.max(
-      positiveStats(detailHistoryPoints, 'fanRpm').peak,
-      positiveStats(detailHistoryPoints, 'cpuFanRpm').peak,
-      positiveStats(detailHistoryPoints, 'gpuFanRpm').peak,
-    );
-    // 上取整到 500 的整数倍，让右轴刻度落在整齐数值（如 4500）而非原始峰值 4114。
-    return Math.max(4000, Math.ceil((peak + 200) / 500) * 500);
-  }, [detailHistoryPoints]);
-
-  // 笔记本内置风扇转速仅部分机型（Uniwill/同方准系统）可读；无任何有效样本时整组曲线与图例隐藏。
-  const hasLaptopFanHistory = useMemo(
-    () => detailHistoryPoints.some((point) => point.cpuFanRpm > 0 || point.gpuFanRpm > 0),
-    [detailHistoryPoints],
-  );
-
-  const historyPowerMax = useMemo(() => {
-    const peak = Math.max(
-      positiveStats(detailHistoryPoints, 'cpuPower').peak,
-      positiveStats(detailHistoryPoints, 'gpuPower').peak,
-    );
-    if (peak <= 0) return 0;
-    return Math.max(20, Math.ceil((peak + 10) / 10) * 10);
-  }, [detailHistoryPoints]);
-
-  const historySummary = useMemo(() => {
-    const latest = temperatureHistory[temperatureHistory.length - 1] ?? null;
-    const first = temperatureHistory[0] ?? null;
-    const cpu = positiveStats(temperatureHistory, 'cpuTemp');
-    const gpu = positiveStats(temperatureHistory, 'gpuTemp');
-    const cpuPower = positiveStats(temperatureHistory, 'cpuPower');
-    const gpuPower = positiveStats(temperatureHistory, 'gpuPower');
-    const fan = positiveStats(temperatureHistory, 'fanRpm');
-    const average = (stats: PositiveStats) => stats.count > 0 ? Math.round(stats.sum / stats.count) : 0;
-    const averagePower = (stats: PositiveStats) => stats.count > 0 ? Math.round(stats.sum / stats.count * 10) / 10 : 0;
-
-    return {
-      sampleCount: temperatureHistory.length,
-      latest,
-      latestLabel: latest ? formatHistoryDateTime(latest.timestamp, locale) : '--',
-      durationLabel: first && latest ? formatHistoryDuration(first.timestamp, latest.timestamp, t) : '--',
-      cpuPeak: cpu.peak,
-      cpuAverage: average(cpu),
-      gpuPeak: gpu.peak,
-      gpuAverage: average(gpu),
-      cpuPowerPeak: cpuPower.peak,
-      cpuPowerAverage: averagePower(cpuPower),
-      gpuPowerPeak: gpuPower.peak,
-      gpuPowerAverage: averagePower(gpuPower),
-      fanPeak: fan.peak,
-      fanAverage: average(fan),
-    };
-  }, [locale, t, temperatureHistory]);
-  const historyChartData = detailHistoryPoints;
-  // 趋势图缩放区间（时间戳范围）；null 表示未缩放（跟随全部数据）。
-  const [historyZoomDomain, setHistoryZoomDomain] = useState<[number, number] | null>(null);
-  // 正在拖拽框选的临时区间，用于渲染半透明选区。
-  const [historyZoomSelect, setHistoryZoomSelect] = useState<{ start: number; end: number } | null>(null);
-  // 最近趋势 / 功耗趋势共用同一份裁切数据，天然保持缩放与指针联动。
-  const zoomedHistoryChartData = useMemo(() => {
-    if (!historyZoomDomain) return historyChartData;
-    const [from, to] = historyZoomDomain;
-    const sliced = historyChartData.filter((point) => point.timestamp >= from && point.timestamp <= to);
-    return sliced.length >= 2 ? sliced : historyChartData;
-  }, [historyChartData, historyZoomDomain]);
-  // 渲染用数据：对可见窗口等距抽稀到上限点数。两图共用同一份，保持缩放与指针联动。
-  //
-  // 抽稀之后再找中断：抽稀本身会把相邻点的间隔按 stride 等比拉大，用原始数据的阈值
-  // 会把每一段都判成中断；改用抽稀后自身的节奏做判据，缩放到哪一级就用哪一级的尺度。
-  const { historyDisplayData, historyGaps } = useMemo(() => {
-    const sampled = downsampleHistoryPoints(zoomedHistoryChartData, HISTORY_RAW_CAP);
-    const gaps = findHistoryGaps(sampled, historyGapThresholdMs(sampled));
-    return { historyDisplayData: insertHistoryGapBreaks(sampled, gaps), historyGaps: gaps };
-  }, [zoomedHistoryChartData]);
-  const handleHistoryZoomMouseDown = useCallback((state: { activeLabel?: string | number } | null) => {
-    if (state?.activeLabel == null) return;
-    const ts = Number(state.activeLabel);
-    setHistoryZoomSelect({ start: ts, end: ts });
-  }, []);
-  const handleHistoryZoomMouseMove = useCallback((state: { activeLabel?: string | number } | null) => {
-    if (state?.activeLabel == null) return;
-    const ts = Number(state.activeLabel);
-    setHistoryZoomSelect((prev) => (prev ? { ...prev, end: ts } : prev));
-  }, []);
-  const handleHistoryZoomMouseUp = useCallback(() => {
-    setHistoryZoomSelect((prev) => {
-      if (prev) {
-        const from = Math.min(prev.start, prev.end);
-        const to = Math.max(prev.start, prev.end);
-        // 选区过窄（不足两个采样点）视为误触，忽略。
-        if (historyChartData.filter((point) => point.timestamp >= from && point.timestamp <= to).length >= 2) {
-          setHistoryZoomDomain([from, to]);
-        }
-      }
-      return null;
-    });
-  }, [historyChartData]);
-  const resetHistoryZoom = useCallback(() => {
-    setHistoryZoomSelect(null);
-    setHistoryZoomDomain(null);
-  }, []);
-  const visibleTimelineEvents = useMemo(() => {
-    const first = zoomedHistoryChartData[0]?.timestamp ?? 0;
-    const last = zoomedHistoryChartData[zoomedHistoryChartData.length - 1]?.timestamp ?? Number.MAX_SAFE_INTEGER;
-    const inWindow = timelineEvents.filter((event) => event.timestamp >= first && event.timestamp <= last);
-    if (inWindow.length <= TIMELINE_MARKER_CAP) return inWindow;
-    // 超出可读上限时按重要性取舍，而不是简单地留最近的几条：断连和睡眠唤醒才是
-    // 用户找的东西，几小时前的一次断连不该被后来一串"切换曲线方案"挤掉。
-    return inWindow
-      .map((event, index) => ({ event, index }))
-      .sort((a, b) => (TIMELINE_MARKER_PRIORITY[b.event.type] - TIMELINE_MARKER_PRIORITY[a.event.type]) || (b.index - a.index))
-      .slice(0, TIMELINE_MARKER_CAP)
-      .sort((a, b) => a.index - b.index)
-      .map(({ event }) => event);
-  }, [zoomedHistoryChartData, timelineEvents]);
-  // 为聚集在一起的时间线标记分配垂直行号，避免各条参考线的文字标签叠在同一处；
-  // 同时按标记在时间轴的位置决定文字朝向，防止靠右的标记文字溢出图表。
-  const timelineEventLayout = useMemo(() => {
-    const first = zoomedHistoryChartData[0]?.timestamp ?? 0;
-    const last = zoomedHistoryChartData[zoomedHistoryChartData.length - 1]?.timestamp ?? first;
-    const range = Math.max(1, last - first);
-    const minGap = range * 0.07; // 时间间隔小于可见跨度 7% 的标记视为“重叠”，需错行显示
-    const maxRows = 4;
-    const rowLastTs: number[] = [];
-    return visibleTimelineEvents.map((event) => {
-      let row = rowLastTs.findIndex((ts) => event.timestamp - ts >= minGap);
-      if (row === -1) {
-        row = rowLastTs.length < maxRows
-          ? rowLastTs.length
-          : rowLastTs.reduce((best, ts, i) => (ts < rowLastTs[best] ? i : best), 0);
-      }
-      rowLastTs[row] = event.timestamp;
-      return { event, row, anchorEnd: (event.timestamp - first) / range > 0.55 };
-    });
-  }, [zoomedHistoryChartData, visibleTimelineEvents]);
-
-  const historySeriesMeta = useMemo(() => ([
-    { key: 'cpu' as const, label: t('fanCurve.history.series.cpu'), color: '#2f6df6' },
-    { key: 'gpu' as const, label: t('fanCurve.history.series.gpu'), color: '#f97316' },
-    { key: 'fan' as const, label: t('fanCurve.history.series.fan'), color: '#10b981' },
-    ...(hasLaptopFanHistory ? [
-      { key: 'cpuFan' as const, label: t('fanCurve.history.series.cpuFan'), color: '#0ea5e9' },
-      { key: 'gpuFan' as const, label: t('fanCurve.history.series.gpuFan'), color: '#84cc16' },
-    ] : []),
-    { key: 'cpuPower' as const, label: t('fanCurve.history.series.cpuPower'), color: '#8b5cf6' },
-    { key: 'gpuPower' as const, label: t('fanCurve.history.series.gpuPower'), color: '#ec4899' },
-  ]), [t, locale, hasLaptopFanHistory]);
-
-  const toggleHistorySeries = useCallback((series: HistorySeriesKey) => {
-    setHistorySeriesVisibility((prev) => ({
-      ...prev,
-      [series]: !prev[series],
-    }));
-  }, []);
-
-  const tempChartSeries = useMemo<HistoryLineSpec[]>(() => ([
-    { key: 'cpu', dataKey: 'cpuTemp', axis: 'temp', color: '#2f6df6', width: 2.2 },
-    { key: 'gpu', dataKey: 'gpuTemp', axis: 'temp', color: '#f97316', width: 2.2 },
-    { key: 'fan', dataKey: 'fanRpm', axis: 'fan', color: '#10b981', width: 2 },
-    ...(hasLaptopFanHistory ? [
-      { key: 'cpuFan' as const, dataKey: 'cpuFanRpm' as const, axis: 'fan', color: '#0ea5e9', width: 1.4, dash: '5 4' },
-      { key: 'gpuFan' as const, dataKey: 'gpuFanRpm' as const, axis: 'fan', color: '#84cc16', width: 1.4, dash: '5 4' },
-    ] : []),
-  ]), [hasLaptopFanHistory]);
-  const powerChartSeries = useMemo<HistoryLineSpec[]>(() => ([
-    { key: 'cpuPower', dataKey: 'cpuPower', axis: 'power', color: '#8b5cf6', width: 2.2 },
-    { key: 'gpuPower', dataKey: 'gpuPower', axis: 'power', color: '#ec4899', width: 2.2 },
-  ]), []);
-  const tempChartKeys = useMemo<HistorySeriesKey[]>(() => tempChartSeries.map((s) => s.key), [tempChartSeries]);
-  const powerChartKeys = useMemo<HistorySeriesKey[]>(() => powerChartSeries.map((s) => s.key), [powerChartSeries]);
 
   /* ── Init ── */
 
@@ -1842,18 +2032,8 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
   }, [handleScheduleRuleChange, scheduleTimeDrafts]);
 
   /* ── Reference temperature (follows settings 控温温度来源: max/cpu/gpu) ──
-     直接从 store 取算好的一个数：只有它变了才重渲染曲线页，而不是每次温度推送都重渲染。 */
-  const tempSource = (((config as any).tempSource as string) || 'max') as 'max' | 'cpu' | 'gpu';
-  const referenceTemp = useAppStore(useCallback((state: ReturnType<typeof useAppStore.getState>) => {
-    const temperature = state.temperature;
-    if (!temperature) return null;
-    const cpu = temperature.cpuTemp ?? 0;
-    const gpu = temperature.gpuTemp ?? 0;
-    const max = temperature.maxTemp ?? 0;
-    if (tempSource === 'cpu') return cpu > 0 ? cpu : (max > 0 ? max : null);
-    if (tempSource === 'gpu') return gpu > 0 ? gpu : (max > 0 ? max : null);
-    return max > 0 ? max : null;
-  }, [tempSource]));
+     具体数值由 TemperatureIndicator 自己订阅，曲线页主体不随温度推送重渲染。 */
+  const tempSource = (((config as any).tempSource as string) || 'max') as CurveTempSource;
 
   /* ── Manual gear ── */
 
@@ -2185,7 +2365,7 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
           >
             <div className="h-80 md:h-96 relative">
               {curveChart}
-              <TemperatureIndicator temperature={referenceTemp} chartRef={chartRef} temperatureRange={temperatureRange} />
+              <TemperatureIndicator tempSource={tempSource} chartRef={chartRef} temperatureRange={temperatureRange} />
             </div>
           </div>
         </div>
@@ -2512,149 +2692,7 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
           )}
         </section>
 
-        <section ref={historyDetailsRef} className="rounded-2xl border border-border/70 bg-card p-4 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <History className="h-4 w-4 text-primary" />
-              <div>
-                <div className="text-sm font-medium text-foreground">{t('fanCurve.history.detailsTitle')}</div>
-                <div className="text-xs text-muted-foreground">{t('fanCurve.history.detailsDescription')}</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <ToggleSwitch
-                enabled={temperatureHistoryEnabled}
-                onChange={setTemperatureHistoryEnabled}
-                loading={temperatureHistorySaving}
-                label={temperatureHistorySaving ? t('fanCurve.history.saving') : t('fanCurve.history.backgroundRecording')}
-                size="sm"
-                color="blue"
-              />
-            </div>
-          </div>
-
-          {temperatureHistory.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border/70 bg-background/35 px-4 py-8 text-center text-sm text-muted-foreground">
-              {temperatureHistoryEnabled ? t('fanCurve.history.emptyEnabled') : t('fanCurve.history.emptyDisabled')}
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
-                {[
-                  [t('fanCurve.history.summary.cpuPeak'), historySummary.cpuPeak ? `${historySummary.cpuPeak}°C` : '--', historySummary.cpuAverage ? t('fanCurve.history.summary.averageTemperature', { value: historySummary.cpuAverage }) : t('fanCurve.history.summary.noCpuTemperature')],
-                  [t('fanCurve.history.summary.gpuPeak'), historySummary.gpuPeak ? `${historySummary.gpuPeak}°C` : '--', historySummary.gpuAverage ? t('fanCurve.history.summary.averageTemperature', { value: historySummary.gpuAverage }) : t('fanCurve.history.summary.noGpuTemperature')],
-                  [t('fanCurve.history.summary.cpuPowerPeak'), historySummary.cpuPowerPeak ? `${historySummary.cpuPowerPeak.toFixed(1)} W` : '--', historySummary.cpuPowerAverage ? t('fanCurve.history.summary.averagePower', { value: historySummary.cpuPowerAverage.toFixed(1) }) : t('fanCurve.history.summary.noCpuPower')],
-                  [t('fanCurve.history.summary.gpuPowerPeak'), historySummary.gpuPowerPeak ? `${historySummary.gpuPowerPeak.toFixed(1)} W` : '--', historySummary.gpuPowerAverage ? t('fanCurve.history.summary.averagePower', { value: historySummary.gpuPowerAverage.toFixed(1) }) : t('fanCurve.history.summary.noGpuPower')],
-                  [t('fanCurve.history.summary.fanPeak'), historySummary.fanPeak ? `${historySummary.fanPeak} RPM` : '--', historySummary.fanAverage ? t('fanCurve.history.summary.averageFan', { value: historySummary.fanAverage }) : t('fanCurve.history.summary.noFanData')],
-                ].map(([label, value, hint]) => (
-                  <div key={label} className="min-w-0 rounded-xl border border-border/70 bg-background/35 p-2.5">
-                    <div className="truncate text-[11px] text-muted-foreground" title={label}>{label}</div>
-                    <div className="mt-1 truncate text-sm font-semibold text-foreground" title={value}>{value}</div>
-                    <div className="mt-1 truncate text-[11px] text-muted-foreground" title={hint}>{hint}</div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="rounded-xl border border-border/70 bg-background/35 p-3 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-xs font-medium text-muted-foreground">{t('fanCurve.history.recentTrend')}</div>
-                    {historyZoomDomain ? (
-                      <button
-                        type="button"
-                        onClick={resetHistoryZoom}
-                        className="cursor-pointer rounded-full border border-border/70 bg-card px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        {t('fanCurve.history.resetZoom')}
-                      </button>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground/60">{t('fanCurve.history.zoomHint')}</span>
-                    )}
-                    <span className="mx-0.5 h-3 w-px bg-border/70" />
-                    <span className="text-[11px] text-muted-foreground">{t('fanCurve.history.retention.label')}</span>
-                    <Select
-                      value={historyRetentionHours}
-                      onChange={(value) => { void setHistoryRetentionHours(Number(value)); }}
-                      disabled={temperatureHistorySaving}
-                      size="sm"
-                      className="min-w-23"
-                      triggerClassName="h-7 rounded-full px-2.5 text-[11px]"
-                      options={HISTORY_RETENTION_HOUR_OPTIONS.map((hours) => ({
-                        value: hours,
-                        label: t('fanCurve.history.retention.hours', { count: hours }),
-                      }))}
-                    />
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {historySeriesMeta.map((series) => (
-                      <button
-                        key={series.key}
-                        type="button"
-                        onClick={() => toggleHistorySeries(series.key)}
-                        className={clsx(
-                          'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
-                          historySeriesVisibility[series.key]
-                            ? 'border-border bg-card text-foreground'
-                            : 'border-border/60 bg-transparent text-muted-foreground/65',
-                        )}
-                      >
-                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: series.color }} />
-                        {series.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {historyChartData.length < 2 ? (
-                  <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">{t('fanCurve.history.waitingMoreSamples')}</div>
-                ) : (
-                  <div className="h-72 select-none">
-                    <HistoryTempChart
-                      data={historyDisplayData}
-                      gaps={historyGaps}
-                      series={tempChartSeries}
-                      seriesKeys={tempChartKeys}
-                      seriesMeta={historySeriesMeta}
-                      visibility={historySeriesVisibility}
-                      zoomSelection={historyZoomSelect}
-                      locale={locale}
-                      onZoomMouseDown={handleHistoryZoomMouseDown}
-                      onZoomMouseMove={handleHistoryZoomMouseMove}
-                      onZoomMouseUp={handleHistoryZoomMouseUp}
-                      onResetZoom={resetHistoryZoom}
-                      tempDomain={historyTempDomain}
-                      fanMax={historyFanMax}
-                      timelineEventLayout={timelineEventLayout}
-                    />
-                  </div>
-                )}
-
-                {historyPowerMax > 0 && (historySeriesVisibility.cpuPower || historySeriesVisibility.gpuPower) && (
-                  <div className="border-t border-border/60 pt-3">
-                    <div className="mb-2 text-xs font-medium text-muted-foreground">{t('fanCurve.history.powerTrend')}</div>
-                    <div className="h-48 select-none">
-                      <HistoryPowerChart
-                        data={historyDisplayData}
-                        gaps={historyGaps}
-                        series={powerChartSeries}
-                        seriesKeys={powerChartKeys}
-                        seriesMeta={historySeriesMeta}
-                        visibility={historySeriesVisibility}
-                        zoomSelection={historyZoomSelect}
-                        locale={locale}
-                        onZoomMouseDown={handleHistoryZoomMouseDown}
-                        onZoomMouseMove={handleHistoryZoomMouseMove}
-                        onZoomMouseUp={handleHistoryZoomMouseUp}
-                        onResetZoom={resetHistoryZoom}
-                        powerMax={historyPowerMax}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </section>
+        <HistoryDetailsSection sectionRef={historyDetailsRef} timelineEvents={timelineEvents} />
 
         {/* ── 新增曲线方案弹窗 ── */}
         <Dialog open={createProfileDialogOpen} onOpenChange={setCreateProfileDialogOpen}>
