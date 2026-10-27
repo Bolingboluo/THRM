@@ -5,6 +5,10 @@ on:
     paths-ignore:
       - 'ota/**'
       - '**/*.md'
+      - 'website/**'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   push:
     branches:
       - main
@@ -15,6 +19,10 @@ on:
     paths-ignore:
       - 'ota/**'
       - '**/*.md'
+      - 'website/**'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   workflow_dispatch:
     inputs:
       prerelease_tag:
@@ -27,14 +35,31 @@ on:
         default: true
         type: boolean
 
+# PR: a new push cancels the PR's previous, now-outdated run.
+# push / tag / manual runs: every run gets its own group (run_id), so none is ever cancelled or
+# left pending behind another; a shared group would cancel queued runs even with
+# cancel-in-progress: false, which would drop branch artifacts or releases.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      # Master switch for the whole SignPath signing chain. SignPath has not authorized
+      # the signing policy for this project yet, so every signing step is skipped and
+      # releases ship unsigned binaries, exactly as they did before the SignPath
+      # integration landed. Flip this to 'true' once the signing policy is approved.
+      # The plan step turns it into the should_sign output that build-windows reads.
+      SIGNPATH_ENABLED: 'false'
     outputs:
       should_build: ${{ steps.plan.outputs.should_build }}
       should_publish_release: ${{ steps.plan.outputs.should_publish_release }}
+      should_sign: ${{ steps.plan.outputs.should_sign }}
       release_type: ${{ steps.plan.outputs.release_type }}
       is_prerelease: ${{ steps.plan.outputs.is_prerelease }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
@@ -49,8 +74,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
+          # Needs tags and history: latest_stable_tag and has_effective_changes below.
           fetch-depth: 0
 
       - name: Determine release plan
@@ -65,6 +91,7 @@ jobs:
           {
             echo "should_build=false"
             echo "should_publish_release=false"
+            echo "should_sign=false"
             echo "release_type=none"
             echo "is_prerelease=false"
             echo "release_tag="
@@ -78,20 +105,26 @@ jobs:
             echo "previous_stable_tag="
           } >> "$GITHUB_OUTPUT"
 
+          # Keep in sync with on.*.paths-ignore above.
           has_effective_changes() {
             local sha="$1"
-            if git show --pretty="" --name-only "$sha" | grep -Ev '^(ota/|.*\.md$)' | grep -q .; then
+            if git show --pretty="" --name-only "$sha" \
+              | grep -Ev '^(ota/|website/|docs/|\.github/ISSUE_TEMPLATE/|\.github/pull_request_template\.md$|.*\.md$)' \
+              | grep -q .; then
               return 0
             fi
 
             return 1
           }
 
+          should_publish=false
+
           # Latest formal-release tag (v*/V*) reachable from the built commit.
           # The preview compares this tag -> the current commit ("all changes since the last formal release").
           latest_stable_tag=$(git tag --list 'v*' 'V*' --sort=-v:refname --merged "${GITHUB_SHA}" | head -n1 || true)
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${MANUAL_PUBLISH}" == "true" ]]; then
+            should_publish=true
             today=$(TZ=Asia/Shanghai date +%Y%m%d)
             release_tag="${MANUAL_PRERELEASE_TAG:-nightly-$today}"
 
@@ -111,48 +144,179 @@ jobs:
               echo "previous_stable_tag=$latest_stable_tag"
             } >> "$GITHUB_OUTPUT"
           elif [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            if has_effective_changes "${GITHUB_SHA}"; then
-              normalized_tag="${GITHUB_REF_NAME#v}"
-              normalized_tag="${normalized_tag#V}"
-              normalized_tag_lc="${normalized_tag,,}"
+            # A pushed v* tag is an explicit request to release, so it always builds and
+            # publishes. paths-ignore does not apply to tag pushes; this job used to skip
+            # tags whose commit only touched ignored paths, which silently left a tag with
+            # no release. Now that case only gets a notice.
+            if ! has_effective_changes "${GITHUB_SHA}"; then
+              echo "::notice::The tagged commit only touches docs/website/ota paths; publishing ${GITHUB_REF_NAME} anyway."
+            fi
+            should_publish=true
 
-              # A SignPath test tag must never look like a stable release. It
-              # creates a GitHub pre-release and the final notes add an
-              # explicit self-signed-certificate test notice.
-              if [[ "$normalized_tag_lc" == *signpath-test* || "$normalized_tag_lc" == *-test* ]]; then
-                {
-                  echo "should_build=true"
-                  echo "should_publish_release=true"
-                  echo "release_type=prerelease"
-                  echo "is_prerelease=true"
-                  echo "release_tag=${GITHUB_REF_NAME}"
-                  echo "release_name=SignPath test pre-release ${GITHUB_REF_NAME}"
-                  echo "release_label=SignPath test pre-release"
-                  echo "release_guidance=This is a SignPath integration-test pre-release. State clearly that it uses a self-signed test certificate, is not a production release, and may trigger Windows warnings. Do not describe it as stable or trusted."
-                  echo "build_version=$normalized_tag"
-                } >> "$GITHUB_OUTPUT"
-              else
-                {
-                  echo "should_build=true"
-                  echo "should_publish_release=true"
-                  echo "release_type=stable"
-                  echo "is_prerelease=false"
-                  echo "release_tag=${GITHUB_REF_NAME}"
-                  echo "release_name=${GITHUB_REF_NAME}"
-                  echo "release_label=formal release"
-                  echo "release_guidance=This is a formal release. Emphasize stable delivery and user-visible changes, but only state facts supported by the commit data."
-                  echo "build_version=$normalized_tag"
-                } >> "$GITHUB_OUTPUT"
+            normalized_tag="${GITHUB_REF_NAME#v}"
+            normalized_tag="${normalized_tag#V}"
+            normalized_tag_lc="${normalized_tag,,}"
+
+            # A SignPath test tag must never look like a stable release. It
+            # creates a GitHub pre-release and the final notes add an
+            # explicit self-signed-certificate test notice.
+            if [[ "$normalized_tag_lc" == *signpath-test* || "$normalized_tag_lc" == *-test* ]]; then
+              {
+                echo "should_build=true"
+                echo "should_publish_release=true"
+                echo "release_type=prerelease"
+                echo "is_prerelease=true"
+                echo "release_tag=${GITHUB_REF_NAME}"
+                echo "release_name=SignPath test pre-release ${GITHUB_REF_NAME}"
+                echo "release_label=SignPath test pre-release"
+                echo "release_guidance=This is a SignPath integration-test pre-release. State clearly that it uses a self-signed test certificate, is not a production release, and may trigger Windows warnings. Do not describe it as stable or trusted."
+                echo "build_version=$normalized_tag"
+              } >> "$GITHUB_OUTPUT"
+            else
+              # build/config.yml info.version is the single source of the version: it goes
+              # into the exe resources, the installer and the Linux packages. A release tag
+              # that disagrees with it would ship binaries reporting a different version, so
+              # refuse to publish. A suffixed tag (v3.9.0-rc1) must match on its x.y.z part.
+              config_version=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' build/config.yml | head -n1)
+              if [[ -z "$config_version" ]]; then
+                echo "::error file=build/config.yml::Could not parse info.version from build/config.yml"
+                exit 1
               fi
+              if [[ "${normalized_tag%%-*}" != "$config_version" ]]; then
+                echo "::error file=build/config.yml::Tag ${GITHUB_REF_NAME} does not match build/config.yml info.version ${config_version}. Bump info.version in the tagged commit (or fix the tag), then re-tag."
+                exit 1
+              fi
+              echo "Tag ${GITHUB_REF_NAME} matches build/config.yml info.version ${config_version}"
+
+              {
+                echo "should_build=true"
+                echo "should_publish_release=true"
+                echo "release_type=stable"
+                echo "is_prerelease=false"
+                echo "release_tag=${GITHUB_REF_NAME}"
+                echo "release_name=${GITHUB_REF_NAME}"
+                echo "release_label=formal release"
+                echo "release_guidance=This is a formal release. Emphasize stable delivery and user-visible changes, but only state facts supported by the commit data."
+                echo "build_version=$normalized_tag"
+              } >> "$GITHUB_OUTPUT"
             fi
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
+          # Sign exactly what gets published (tag releases and manual preview releases);
+          # PR and branch artifacts stay unsigned development builds.
+          if [[ "${SIGNPATH_ENABLED}" == "true" && "$should_publish" == "true" ]]; then
+            echo "should_sign=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Quality gate. Independent of prepare-release so it runs on every PR and push in
+  # parallel with the builds; publish-release waits for it.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-4-dev libwebkitgtk-6.0-dev \
+            libhidapi-dev libudev-dev
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Cache frontend dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            frontend/node_modules
+            ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('frontend/package.json', 'frontend/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      # main.go embeds all:frontend/dist, so the Go packages only type-check when the
+      # directory has a file in it. vet/test/bindings do not need the real UI build.
+      - name: Stub frontend/dist for go:embed
+        run: |
+          mkdir -p frontend/dist
+          [ -n "$(ls -A frontend/dist)" ] || echo 'ci placeholder' > frontend/dist/.ci-placeholder
+
+      - name: gofmt
+        run: |
+          # internal/bridge is excluded for now: its files predate gofmt and have
+          # uncommitted local work on them. Drop the filter once that lands gofmt-clean.
+          # .gitattributes checks *.go out with LF everywhere, so this is OS-independent.
+          unformatted=$(git ls-files -z '*.go' | grep -zv '^internal/bridge/' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted (run gofmt -w):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -short skips the hardware tests (real BLE/HID devices) that cannot run on CI.
+        run: go test -short ./...
+
+      - name: Wails bindings are up to date
+        run: |
+          wails3 generate bindings -clean=true -d frontend/bindings -silent . ./internal/guiapp
+          # status (not diff) also catches newly generated and deleted files.
+          if [ -n "$(git status --porcelain -- frontend/bindings)" ]; then
+            echo "::error::frontend/bindings is stale. Run 'wails3 task bindings' and commit the result."
+            git status --porcelain -- frontend/bindings
+            git diff -- frontend/bindings | head -n 200
+            exit 1
+          fi
+
+      - name: TypeScript typecheck
+        working-directory: frontend
+        run: bun run typecheck
+
   build-windows:
     needs: prepare-release
     if: needs.prepare-release.outputs.should_build == 'true'
     runs-on: windows-latest
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
@@ -166,21 +330,19 @@ jobs:
       # Switch this to release-signing after SignPath imports the production CA
       # certificate and the corresponding policy is enabled.
       SIGNPATH_SIGNING_POLICY_SLUG: test-signing
-      # Master switch for the whole signing chain. SignPath has not authorized
-      # the signing policy for this project yet, so every signing step is
-      # skipped and releases ship unsigned binaries, exactly as they did before
-      # the SignPath integration landed. Flip this to 'true' once the signing
-      # policy is approved.
-      SIGNPATH_ENABLED: 'false'
+      # The signing master switch (SIGNPATH_ENABLED) lives on prepare-release, which
+      # exposes the combined decision as needs.prepare-release.outputs.should_sign.
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # The build reads the version from build/config.yml / THRM_BUILD_VERSION and
+          # builds Go with -buildvcs=false, so no history or tags are needed here.
+          fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -188,10 +350,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: '1.3.14'
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
 
@@ -199,7 +361,7 @@ jobs:
         shell: pwsh
         run: |
           go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
-          go install github.com/tc-hib/go-winres@latest
+          go install github.com/tc-hib/go-winres@v0.3.3
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:USERPROFILE 'go\bin')
 
       - name: Ensure NSIS
@@ -211,7 +373,7 @@ jobs:
             # Chocolatey 社区源偶发 499/503，而且失败时 choco 仍可能返回 0（"installed 0/0 packages"），
             # 所以以 makensis.exe 是否存在为准；源一直不可用时改从 NSIS 官方的 SourceForge 下载。
             for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
-              choco install nsis -y --no-progress
+              choco install nsis --version=3.11 -y --no-progress
               if (-not (Test-Path $makensis)) {
                 Write-Warning "choco install nsis did not produce makensis (attempt $attempt)"
                 Start-Sleep -Seconds (15 * $attempt)
@@ -234,14 +396,25 @@ jobs:
           exit 0
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             frontend/node_modules
             C:\Users\runneradmin\.bun\install\cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('frontend/package.json', 'frontend/bun.lock', 'frontend/package-lock.json') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('frontend/package.json', 'frontend/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
+
+      # TempBridge restores from NuGet twice per build (TempBridge and the pinned
+      # LibreHardwareMonitorLib). build_bridge.bat pins the LHM commit, so hashing it
+      # together with the project files tracks every dependency change.
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('bridge/TempBridge/*.csproj', 'build_bridge.bat') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Build TempBridge
         shell: cmd
@@ -253,13 +426,14 @@ jobs:
           THRM_BUILD_VERSION: ${{ needs.prepare-release.outputs.build_version }}
         run: build.bat
 
-      # Sign only release-shaped builds. Pull requests and ordinary branch
-      # artifacts remain unsigned development artifacts. Component signing
+      # Sign only release-shaped builds (should_sign, decided by prepare-release).
+      # Pull requests and ordinary branch artifacts remain unsigned development
+      # artifacts. Component signing
       # requests happen before NSIS packaging so the installer contains the
       # signed application binaries; four SignPath requests cover the three
       # Windows executables and the final installer.
       - name: Prepare THRM.exe for SignPath
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/thrm | Out-Null
@@ -267,7 +441,7 @@ jobs:
 
       - name: Upload THRM.exe for SignPath
         id: upload-thrm
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-${{ github.run_id }}
@@ -278,7 +452,7 @@ jobs:
 
       - name: Sign THRM.exe with SignPath
         id: sign-thrm
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -291,7 +465,7 @@ jobs:
           output-artifact-directory: build/signed/thrm
 
       - name: Replace THRM.exe with the signed artifact
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/thrm -Filter 'THRM.exe' -File -Recurse | Select-Object -First 1
@@ -299,7 +473,7 @@ jobs:
           Copy-Item $signed.FullName build/bin/THRM.exe -Force
 
       - name: Prepare THRM Core.exe for SignPath
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/core | Out-Null
@@ -307,7 +481,7 @@ jobs:
 
       - name: Upload THRM Core.exe for SignPath
         id: upload-core
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-core-${{ github.run_id }}
@@ -318,7 +492,7 @@ jobs:
 
       - name: Sign THRM Core.exe with SignPath
         id: sign-core
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -331,7 +505,7 @@ jobs:
           output-artifact-directory: build/signed/core
 
       - name: Replace THRM Core.exe with the signed artifact
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/core -Filter 'THRM Core.exe' -File -Recurse | Select-Object -First 1
@@ -339,7 +513,7 @@ jobs:
           Copy-Item $signed.FullName 'build/bin/THRM Core.exe' -Force
 
       - name: Prepare THRM TempBridge.exe for SignPath
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/tempbridge | Out-Null
@@ -347,7 +521,7 @@ jobs:
 
       - name: Upload THRM TempBridge.exe for SignPath
         id: upload-tempbridge
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-tempbridge-${{ github.run_id }}
@@ -358,7 +532,7 @@ jobs:
 
       - name: Sign THRM TempBridge.exe with SignPath
         id: sign-tempbridge
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -371,7 +545,7 @@ jobs:
           output-artifact-directory: build/signed/tempbridge
 
       - name: Replace THRM TempBridge.exe with the signed artifact
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/tempbridge -Filter 'THRM TempBridge.exe' -File -Recurse | Select-Object -First 1
@@ -379,14 +553,22 @@ jobs:
           Copy-Item $signed.FullName 'build/bin/bridge/THRM TempBridge.exe' -Force
 
       - name: Rebuild the NSIS installer from signed binaries
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
+          # Same PawnIO version the Taskfile package task passes (build/windows/pawnio.env).
+          $pawnioVersion = (Get-Content build/windows/pawnio.env |
+            Where-Object { $_ -match '^PAWNIO_FILE_VERSION=' } |
+            Select-Object -First 1) -replace '^PAWNIO_FILE_VERSION=', ''
+          if (-not $pawnioVersion) { throw 'PAWNIO_FILE_VERSION missing from build/windows/pawnio.env' }
+          # wails_tools.nsh is not tracked; the Build THRM step rendered it in this job.
+          if (-not (Test-Path build/windows/installer/wails_tools.nsh)) { throw 'wails_tools.nsh was not rendered by the build' }
           Push-Location build/windows/installer
           try {
             & makensis `
               '-DARG_WAILS_AMD64_BINARY=..\..\bin\THRM.exe' `
               '-DCORE_EXECUTABLE_SOURCE=..\..\bin\THRM Core.exe' `
+              "-DPAWNIO_BUNDLED_VERSION=$($pawnioVersion.Trim())" `
               'project.nsi'
             if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
           } finally {
@@ -394,7 +576,7 @@ jobs:
           }
 
       - name: Prepare installer for SignPath
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/signing-input/installer | Out-Null
@@ -402,7 +584,7 @@ jobs:
 
       - name: Upload installer for SignPath
         id: upload-installer
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: signpath-thrm-installer-${{ github.run_id }}
@@ -413,7 +595,7 @@ jobs:
 
       - name: Sign installer with SignPath
         id: sign-installer
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -426,7 +608,7 @@ jobs:
           output-artifact-directory: build/signed/installer
 
       - name: Replace installer with the signed artifact
-        if: ${{ env.SIGNPATH_ENABLED == 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)) }}
+        if: needs.prepare-release.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           $signed = Get-ChildItem build/signed/installer -Filter 'THRM-amd64-installer.exe' -File -Recurse | Select-Object -First 1
@@ -448,7 +630,7 @@ jobs:
 
       - name: Upload PR artifacts
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: THRM-windows-${{ github.event.pull_request.number }}
           path: |
@@ -459,7 +641,7 @@ jobs:
 
       - name: Upload branch artifacts
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: THRM-windows-${{ github.sha }}
           path: |
@@ -470,7 +652,7 @@ jobs:
 
       - name: Upload Windows release assets
         if: needs.prepare-release.outputs.should_publish_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: |
@@ -483,17 +665,20 @@ jobs:
     needs: prepare-release
     if: needs.prepare-release.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # Versions come from build/config.yml and prepare-release outputs
+          # (build_version, previous_stable_tag); no history or tags are needed here.
+          fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -501,7 +686,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: '1.3.14'
 
       - name: Install Linux build dependencies
         run: |
@@ -514,12 +699,12 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             frontend/node_modules
             ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('frontend/package.json', 'frontend/bun.lock', 'frontend/package-lock.json') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('frontend/package.json', 'frontend/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -721,7 +906,7 @@ jobs:
 
       - name: Upload PR artifacts
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: THRM-linux-${{ github.event.pull_request.number }}
           path: |
@@ -733,7 +918,7 @@ jobs:
 
       - name: Upload branch artifacts
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: THRM-linux-${{ github.sha }}
           path: |
@@ -745,7 +930,7 @@ jobs:
 
       - name: Upload Linux release assets
         if: needs.prepare-release.outputs.should_publish_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux
           path: |
@@ -756,26 +941,28 @@ jobs:
           retention-days: 1
 
   publish-release:
-    needs: [prepare-release, build-windows, build-linux]
+    needs: [prepare-release, check, build-windows, build-linux]
     if: needs.prepare-release.outputs.should_publish_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
+          # Release notes walk the commit range since the previous tag.
           fetch-depth: 0
 
       - name: Download Windows release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-windows
           path: dist/windows
 
       - name: Download Linux release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux
           path: dist/linux
@@ -871,7 +1058,7 @@ jobs:
           }
 
           $allCommitLines = @($commitLines)
-          $nonUserFacingPathPattern = '^(?:\.github/|\.vscode/|scripts/|ota/|temp/|build/CMakeFiles/|bridge/TempBridge/(?:obj|bin)/|internal/(?:deviceproto|ipc|logger|record|types|version|plugins|hotkey|powernotify|appmeta)/|cmd/watchdog/|libmake/|docs/assets/)'
+          $nonUserFacingPathPattern = '^(?:\.github/|\.vscode/|scripts/|ota/|website/|internal/(?:deviceproto|ipc|logger|types|version|plugins|hotkey|powernotify|appmeta)/|docs/assets/)'
           $nonUserFacingFilePattern = '(?i)\.md$'
 
           $commitHasUserVisibleFiles = @{}
@@ -1132,7 +1319,7 @@ jobs:
           "notes_path=$notesRelativePath" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ needs.prepare-release.outputs.release_name }}
           tag_name: ${{ needs.prepare-release.outputs.release_tag }}

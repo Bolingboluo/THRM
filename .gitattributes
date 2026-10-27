@@ -8,3 +8,18 @@
 # Mark firmware reverse-engineering outputs as generated
 ota/*.asm linguist-generated=true
 ota/*.S linguist-generated=true
+
+# Line endings. With core.autocrlf=true (the Windows default, also on GitHub's Windows
+# runners) these would be checked out as CRLF: gofmt -l then reports every Go file, and
+# generated files stop matching what their generators write. The index is already LF.
+*.go     text eol=lf
+go.mod   text eol=lf
+go.sum   text eol=lf
+*.sh     text eol=lf
+PKGBUILD text eol=lf
+*.rules  text eol=lf
+# Written by `wails3 generate bindings` with LF; CI checks that it is up to date.
+frontend/bindings/** text eol=lf
+# cmd.exe mis-parses labels and goto in LF-only batch files.
+*.bat    text eol=crlf
+*.cmd    text eol=crlf

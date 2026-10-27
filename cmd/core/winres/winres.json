@@ -35,22 +35,22 @@
     "#1": {
       "0000": {
         "fixed": {
-          "file_version": "1.0.0.0",
-          "product_version": "1.0.0.0"
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
         },
         "info": {
           "0409": {
             "Comments": "THRM Core Service",
             "CompanyName": "TIANLI0",
             "FileDescription": "THRM Core Service",
-            "FileVersion": "1.0.0.0",
+            "FileVersion": "0.0.0.0",
             "InternalName": "THRM Core",
-            "LegalCopyright": "Copyright (c) 2025 TIANLI0",
+            "LegalCopyright": "Copyright © 2026 TIANLI0",
             "LegalTrademarks": "",
             "OriginalFilename": "THRM Core.exe",
             "PrivateBuild": "",
             "ProductName": "THRM",
-            "ProductVersion": "1.0.0.0",
+            "ProductVersion": "0.0.0.0",
             "SpecialBuild": ""
           }
         }

@@ -111,9 +111,20 @@
 !macroend
 
 # Built-in PawnIO version for install/update decisions.
-# You can override this at build time with: -DPAWNIO_BUNDLED_VERSION=x.y.z
+# The pinned version lives in build/windows/pawnio.env (PAWNIO_FILE_VERSION); the Taskfile
+# package task and CI pass it as -DPAWNIO_BUNDLED_VERSION=x.y.z.w. The default below only
+# serves manual makensis runs and must be kept in sync with that file.
 !ifndef PAWNIO_BUNDLED_VERSION
 !define PAWNIO_BUNDLED_VERSION "2.2.0.0"
+!endif
+
+# Refuse to build when the bundled PawnIO_setup.exe is not the version announced above;
+# otherwise the install/update decision would compare against the wrong number.
+!if /FileExists "..\..\bin\PawnIO_setup.exe"
+    !getdllversion "..\..\bin\PawnIO_setup.exe" PAWNIO_FILE_VER_
+    !if "${PAWNIO_FILE_VER_1}.${PAWNIO_FILE_VER_2}.${PAWNIO_FILE_VER_3}.${PAWNIO_FILE_VER_4}" != "${PAWNIO_BUNDLED_VERSION}"
+        !error "bin\PawnIO_setup.exe is version ${PAWNIO_FILE_VER_1}.${PAWNIO_FILE_VER_2}.${PAWNIO_FILE_VER_3}.${PAWNIO_FILE_VER_4}, but PAWNIO_BUNDLED_VERSION is ${PAWNIO_BUNDLED_VERSION} (see build/windows/pawnio.env)"
+    !endif
 !endif
 
 !ifndef CORE_EXECUTABLE_SOURCE

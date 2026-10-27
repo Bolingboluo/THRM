@@ -24,11 +24,25 @@ set "BUILD_BIN=build\bin"
 set LDFLAGS=-s -w -X github.com/TIANLI0/THRM/internal/version.BuildVersion=!VERSION! -H=windowsgui
 
 if not exist "!BUILD_BIN!" mkdir "!BUILD_BIN!"
+if not exist "!BUILD_BIN!" (
+    echo ERROR: Could not create !BUILD_BIN!
+    exit /b 1
+)
 
 REM Build core service first
 echo Building core service...
-go-winres make --in cmd/core/winres/winres.json --out cmd/core/rsrc
+REM The core's version resource carries the same build/config.yml version as the GUI;
+REM winres.json only holds the static fields (icon, manifest, names).
+go-winres make --in cmd/core/winres/winres.json --out cmd/core/rsrc --product-version !PRODUCT_VERSION! --file-version !PRODUCT_VERSION!
+if errorlevel 1 (
+    echo ERROR: go-winres failed to generate the core service resources
+    exit /b 1
+)
 go build -trimpath -ldflags "!LDFLAGS!" -o "build/bin/THRM Core.exe" ./cmd/core/
+if errorlevel 1 (
+    echo ERROR: Core service build failed
+    exit /b 1
+)
 
 REM Installer icon is still file-based; system notification icon is now embedded in THRM Core.exe
 if not exist "build\windows\icon.ico" (

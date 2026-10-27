@@ -7,6 +7,9 @@
 #   wails3 dev                   开发模式（见 dev 任务）
 version: '3'
 
+# 内置 PawnIO 安装器的固定版本与 SHA-256（build_bridge.bat 下载校验、package 任务传给 makensis 共用）。
+dotenv: ['build/windows/pawnio.env']
+
 vars:
   APP_NAME: THRM
   BIN_DIR: '{{.BIN_DIR | default "build/bin"}}'
@@ -28,7 +31,8 @@ tasks:
     generates:
       - node_modules
     cmds:
-      - bun install
+      # 锁文件是唯一依赖来源：与 bun.lock 不一致时直接失败，不偷偷改写它。
+      - bun install --frozen-lockfile
 
   bindings:
     summary: 用静态分析生成前端绑定（服务方法、模型与强类型事件）
@@ -96,7 +100,7 @@ tasks:
     cmds:
       - wails3 generate webview2bootstrapper -dir .
       # 单引号保住反斜杠：Task 用内置的 sh 解释器执行命令。
-      - makensis '-DARG_WAILS_AMD64_BINARY=..\..\bin\{{.APP_NAME}}.exe' project.nsi
+      - makensis '-DARG_WAILS_AMD64_BINARY=..\..\bin\{{.APP_NAME}}.exe' '-DPAWNIO_BUNDLED_VERSION={{.PAWNIO_FILE_VERSION}}' project.nsi
 
   run:
     cmds:
