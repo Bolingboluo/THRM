@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 下载最新版本
+    url: https://thrm.tianli0.top/#download
+    about: 官网下载（国内推荐），提交问题前请先确认已是最新版本
+  - name: 常见问题
+    url: https://github.com/TIANLI0/THRM#常见问题
+    about: 设备连接、托盘常驻、权限等常见问题的解决办法

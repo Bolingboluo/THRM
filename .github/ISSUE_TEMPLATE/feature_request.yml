@@ -1,0 +1,50 @@
+name: 功能建议 / Feature request
+description: 新功能、交互改进或现有功能的增强
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索 [已有 Issue](https://github.com/TIANLI0/THRM/issues?q=is%3Aissue)，相同的建议可以直接在原 Issue 下补充或点 👍。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 遇到的问题或使用场景
+      description: 现在哪里不方便？在什么情况下会需要这个功能？
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的方案
+      description: 你希望 THRM 怎么做？
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的其他方案
+      description: 可选。目前的变通办法，或其他软件的类似做法
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: 相关设备
+      multiple: true
+      options:
+        - BS1
+        - BS2
+        - BS2 Pro
+        - BS3
+        - BS3 Pro
+        - 与设备无关
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: 参与
+      options:
+        - label: 我愿意提交 Pull Request 实现这个功能

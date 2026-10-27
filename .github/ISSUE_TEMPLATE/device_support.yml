@@ -1,0 +1,67 @@
+name: 新设备适配 / Device support
+description: 申请适配尚未支持的散热器型号或硬件版本
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!WARNING]
+        > 请不要在公开 Issue 中上传包含个人标识信息（MAC 地址、设备序列号等）的完整蓝牙或 USB 抓包。
+        > 需要抓包时，可以先在 Issue 里说明，维护者会联系你确认安全的提交方式。
+
+  - type: input
+    id: model
+    attributes:
+      label: 设备型号
+      placeholder: 例如 飞智 BS4 / BS2 Pro 新版
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: 固件版本
+      description: 飞智官方软件或设备信息中显示的版本
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: 连接方式
+      multiple: true
+      options:
+        - 蓝牙 HID（系统蓝牙设置中配对）
+        - BLE（无需系统配对）
+        - USB 有线
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: ids
+    attributes:
+      label: 设备标识
+      description: |
+        Windows 可在「设备管理器 → 设备属性 → 详细信息 → 硬件 ID」中找到 VID/PID；
+        Linux 可使用 `lsusb` 或 `bluetoothctl info`。BLE 设备请附上广播名称和服务 UUID（如已知）。
+      placeholder: |
+        VID: 0x....
+        PID: 0x....
+        广播名称: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 当前表现
+      description: THRM 能否发现设备？连接后哪些功能可用、哪些不可用？
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断包 / 日志
+      description: 「设置 → 导出诊断包」，上传前请自行检查其中内容

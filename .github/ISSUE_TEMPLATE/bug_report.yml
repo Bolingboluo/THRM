@@ -1,0 +1,115 @@
+name: 问题反馈 / Bug report
+description: THRM 运行异常、设备连接失败、控温不符合预期等问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请先：
+        - 确认已更新到 [最新版本](https://github.com/TIANLI0/THRM/releases/latest)
+        - 搜索 [已有 Issue](https://github.com/TIANLI0/THRM/issues?q=is%3Aissue)，避免重复
+        - 阅读 README 中的 [常见问题](https://github.com/TIANLI0/THRM#常见问题)
+
+  - type: input
+    id: version
+    attributes:
+      label: THRM 版本
+      description: 设置页「关于」中可以看到
+      placeholder: 例如 3.8.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: 散热器型号
+      options:
+        - BS1
+        - BS2
+        - BS2 Pro
+        - BS3
+        - BS3 Pro
+        - 其他 / 不涉及设备
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: 连接方式
+      options:
+        - 蓝牙（HID / BLE）
+        - USB 有线
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统及版本
+      placeholder: 例如 Windows 11 24H2 / Ubuntu 24.04 / Arch Linux
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: 设备固件版本
+      description: 设备信息页可以看到，不清楚可留空
+      placeholder: 例如 1.0.8
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么？你期望的结果是什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 出现 ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: 出现频率
+      options:
+        - 每次都会
+        - 偶尔出现
+        - 只出现过一次
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断包 / 日志
+      description: |
+        请在「设置 → 导出诊断包」后把 zip 拖到这里。
+        Windows 日志位于安装目录的 `logs` 文件夹；Linux 可使用 `journalctl --identifier=thrm --identifier=thrm-core --since today` 查看。
+        诊断包可能包含设备和系统硬件信息，上传前请自行检查，不要公开隐私内容。
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 可选
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已更新到最新版本，问题仍然存在
+          required: true
+        - label: 我已搜索过已有 Issue，没有找到相同问题
+          required: true
