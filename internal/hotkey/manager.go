@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
-	hotkeylib "golang.design/x/hotkey"
 )
 
 // Action 定义快捷键触发的动作。
@@ -21,7 +21,25 @@ const (
 	ActionToggleCurveProfile Action = "toggle-curve-profile"
 )
 
+// Modifier 是 RegisterHotKey 的修饰键位（MOD_*）。
+type Modifier uint32
+
+// Key 是 Windows 虚拟键码（VK_*）。
+type Key uint32
+
+const (
+	ModAlt   Modifier = 0x0001
+	ModCtrl  Modifier = 0x0002
+	ModShift Modifier = 0x0004
+	ModWin   Modifier = 0x0008
+)
+
 // Manager 负责注册/更新/注销全局快捷键。
+//
+// 所有快捷键共用一条消息循环线程（见 msgloop_windows.go），没有按键时线程阻塞在
+// GetMessage 里。此前用的 golang.design/x/hotkey 给每个快捷键开一条锁定线程，并以
+// 10ms 间隔轮询 PeekMessage/GetAsyncKeyState：默认 3 个快捷键就是每秒 300 次唤醒，
+// 占了核心服务约九成的空闲 CPU，还让笔记本 CPU 进不了深度休眠。
 type Manager struct {
 	logger   types.Logger
 	onAction func(action Action, shortcut string)
@@ -29,13 +47,18 @@ type Manager struct {
 	mutex    sync.Mutex
 	bindings map[Action]*binding
 	closed   bool
+	nextID   int32
+
+	// loop 在第一次注册快捷键时才启动，没配快捷键就不占线程。
+	loop *messageLoop
+	// fired 把 WM_HOTKEY 从消息循环线程交给 dispatch 协程：动作回调可能反过来调用
+	// UpdateBindings，若直接在消息循环线程上执行，等待自己处理注册请求会死锁。
+	fired chan int32
 }
 
 type binding struct {
 	shortcut string
-	hk       *hotkeylib.Hotkey
-	keydown  <-chan hotkeylib.Event
-	stopChan chan struct{}
+	id       int32
 }
 
 // NewManager 创建快捷键管理器。
@@ -86,6 +109,11 @@ func (m *Manager) Stop() {
 	for action := range m.bindings {
 		m.unregisterBinding(action)
 	}
+	if m.loop != nil {
+		m.loop.stop()
+		close(m.fired)
+		m.loop = nil
+	}
 }
 
 func (m *Manager) setBinding(action Action, shortcut string) error {
@@ -106,21 +134,24 @@ func (m *Manager) setBinding(action Action, shortcut string) error {
 	if err != nil {
 		return fmt.Errorf("%s 快捷键无效: %w", action, err)
 	}
+	var modMask Modifier
+	for _, mod := range mods {
+		modMask |= mod
+	}
 
-	hk := hotkeylib.New(mods, key)
-	if err := hk.Register(); err != nil {
+	if m.loop == nil {
+		m.fired = make(chan int32, 8)
+		m.loop = startMessageLoop(m.onHotkey)
+		go m.dispatch(m.fired)
+	}
+
+	m.nextID++
+	id := m.nextID
+	if err := m.loop.call(func() error { return registerHotKey(id, modMask, key) }); err != nil {
 		return fmt.Errorf("%s 注册失败(%s): %w", action, shortcut, err)
 	}
 
-	b := &binding{
-		shortcut: shortcut,
-		hk:       hk,
-		keydown:  hk.Keydown(),
-		stopChan: make(chan struct{}),
-	}
-	m.bindings[action] = b
-
-	go m.listen(action, b)
+	m.bindings[action] = &binding{shortcut: shortcut, id: id}
 	m.logInfo("快捷键已注册: %s -> %s", action, shortcut)
 	return nil
 }
@@ -130,43 +161,52 @@ func (m *Manager) unregisterBinding(action Action) {
 	if !ok || b == nil {
 		return
 	}
-	close(b.stopChan)
-	if err := b.hk.Unregister(); err != nil {
+	if err := m.loop.call(func() error { return unregisterHotKey(b.id) }); err != nil {
 		m.logDebug("快捷键注销失败: %s (%v)", action, err)
 	}
 	delete(m.bindings, action)
 }
 
-// listen 只从注册时取到的 keydown 通道收事件。Unregister 会在另一个 goroutine 里
-// 关闭并替换 hk 的事件通道：每轮都调 hk.Keydown() 是数据竞争，读到已关闭的旧通道
-// 还会误触发一次动作，所以通道关闭即退出。
-func (m *Manager) listen(action Action, b *binding) {
-	for {
-		select {
-		case <-b.stopChan:
-			return
-		case _, ok := <-b.keydown:
-			if !ok {
-				return
-			}
-			if m.onAction != nil {
-				m.onAction(action, b.shortcut)
-			}
+// onHotkey 运行在消息循环线程上，只做转交。通道满了说明动作还在处理，丢掉这次按键即可。
+func (m *Manager) onHotkey(id int32) {
+	select {
+	case m.fired <- id:
+	default:
+	}
+}
+
+func (m *Manager) dispatch(fired <-chan int32) {
+	for id := range fired {
+		action, shortcut, ok := m.lookup(id)
+		if ok && m.onAction != nil {
+			m.onAction(action, shortcut)
 		}
 	}
 }
 
+// lookup 找出 id 当前对应的动作。按键与注销可能交错：已注销的 id 找不到，直接忽略。
+func (m *Manager) lookup(id int32) (Action, string, bool) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	for action, b := range m.bindings {
+		if b.id == id {
+			return action, b.shortcut, true
+		}
+	}
+	return "", "", false
+}
+
 // ParseShortcut 解析快捷键字符串，支持 Ctrl/Alt/Shift/Win + A-Z/0-9/F1-F12。
-func ParseShortcut(input string) ([]hotkeylib.Modifier, hotkeylib.Key, error) {
+func ParseShortcut(input string) ([]Modifier, Key, error) {
 	normalized := normalizeShortcut(input)
 	if normalized == "" {
-		return nil, hotkeylib.Key(0), fmt.Errorf("empty shortcut")
+		return nil, 0, fmt.Errorf("empty shortcut")
 	}
 
 	parts := strings.Split(normalized, "+")
-	mods := make([]hotkeylib.Modifier, 0, 3)
-	modSet := map[hotkeylib.Modifier]bool{}
-	key := hotkeylib.Key(0)
+	mods := make([]Modifier, 0, 3)
+	modSet := map[Modifier]bool{}
+	var key Key
 	keySet := false
 
 	for _, part := range parts {
@@ -183,155 +223,59 @@ func ParseShortcut(input string) ([]hotkeylib.Modifier, hotkeylib.Key, error) {
 		}
 
 		if keySet {
-			return nil, hotkeylib.Key(0), fmt.Errorf("multiple main keys")
+			return nil, 0, fmt.Errorf("multiple main keys")
 		}
 
 		parsedKey, err := parseKey(part)
 		if err != nil {
-			return nil, hotkeylib.Key(0), err
+			return nil, 0, err
 		}
 		key = parsedKey
 		keySet = true
 	}
 
 	if !keySet {
-		return nil, hotkeylib.Key(0), fmt.Errorf("missing main key")
+		return nil, 0, fmt.Errorf("missing main key")
 	}
 	if len(mods) == 0 {
-		return nil, hotkeylib.Key(0), fmt.Errorf("missing modifier")
+		return nil, 0, fmt.Errorf("missing modifier")
 	}
 
 	return mods, key, nil
 }
 
-func parseModifier(part string) (hotkeylib.Modifier, bool) {
+func parseModifier(part string) (Modifier, bool) {
 	switch strings.ToUpper(strings.TrimSpace(part)) {
 	case "CTRL", "CONTROL":
-		return hotkeylib.ModCtrl, true
+		return ModCtrl, true
 	case "ALT":
-		return hotkeylib.ModAlt, true
+		return ModAlt, true
 	case "SHIFT":
-		return hotkeylib.ModShift, true
+		return ModShift, true
 	case "WIN", "WINDOWS", "SUPER":
-		return hotkeylib.ModWin, true
+		return ModWin, true
 	default:
-		return hotkeylib.Modifier(0), false
+		return 0, false
 	}
 }
 
-func parseKey(part string) (hotkeylib.Key, error) {
+// parseKey 把主键换成虚拟键码：A-Z、0-9 的虚拟键码就是对应的 ASCII 码，F1-F12 是 0x70-0x7B。
+func parseKey(part string) (Key, error) {
 	token := strings.ToUpper(strings.TrimSpace(part))
 
 	if len(token) == 1 {
-		switch token[0] {
-		case 'A':
-			return hotkeylib.KeyA, nil
-		case 'B':
-			return hotkeylib.KeyB, nil
-		case 'C':
-			return hotkeylib.KeyC, nil
-		case 'D':
-			return hotkeylib.KeyD, nil
-		case 'E':
-			return hotkeylib.KeyE, nil
-		case 'F':
-			return hotkeylib.KeyF, nil
-		case 'G':
-			return hotkeylib.KeyG, nil
-		case 'H':
-			return hotkeylib.KeyH, nil
-		case 'I':
-			return hotkeylib.KeyI, nil
-		case 'J':
-			return hotkeylib.KeyJ, nil
-		case 'K':
-			return hotkeylib.KeyK, nil
-		case 'L':
-			return hotkeylib.KeyL, nil
-		case 'M':
-			return hotkeylib.KeyM, nil
-		case 'N':
-			return hotkeylib.KeyN, nil
-		case 'O':
-			return hotkeylib.KeyO, nil
-		case 'P':
-			return hotkeylib.KeyP, nil
-		case 'Q':
-			return hotkeylib.KeyQ, nil
-		case 'R':
-			return hotkeylib.KeyR, nil
-		case 'S':
-			return hotkeylib.KeyS, nil
-		case 'T':
-			return hotkeylib.KeyT, nil
-		case 'U':
-			return hotkeylib.KeyU, nil
-		case 'V':
-			return hotkeylib.KeyV, nil
-		case 'W':
-			return hotkeylib.KeyW, nil
-		case 'X':
-			return hotkeylib.KeyX, nil
-		case 'Y':
-			return hotkeylib.KeyY, nil
-		case 'Z':
-			return hotkeylib.KeyZ, nil
-		case '0':
-			return hotkeylib.Key0, nil
-		case '1':
-			return hotkeylib.Key1, nil
-		case '2':
-			return hotkeylib.Key2, nil
-		case '3':
-			return hotkeylib.Key3, nil
-		case '4':
-			return hotkeylib.Key4, nil
-		case '5':
-			return hotkeylib.Key5, nil
-		case '6':
-			return hotkeylib.Key6, nil
-		case '7':
-			return hotkeylib.Key7, nil
-		case '8':
-			return hotkeylib.Key8, nil
-		case '9':
-			return hotkeylib.Key9, nil
+		if c := token[0]; (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			return Key(c), nil
 		}
 	}
 
 	if after, ok := strings.CutPrefix(token, "F"); ok {
-		n, err := strconv.Atoi(after)
-		if err == nil {
-			switch n {
-			case 1:
-				return hotkeylib.KeyF1, nil
-			case 2:
-				return hotkeylib.KeyF2, nil
-			case 3:
-				return hotkeylib.KeyF3, nil
-			case 4:
-				return hotkeylib.KeyF4, nil
-			case 5:
-				return hotkeylib.KeyF5, nil
-			case 6:
-				return hotkeylib.KeyF6, nil
-			case 7:
-				return hotkeylib.KeyF7, nil
-			case 8:
-				return hotkeylib.KeyF8, nil
-			case 9:
-				return hotkeylib.KeyF9, nil
-			case 10:
-				return hotkeylib.KeyF10, nil
-			case 11:
-				return hotkeylib.KeyF11, nil
-			case 12:
-				return hotkeylib.KeyF12, nil
-			}
+		if n, err := strconv.Atoi(after); err == nil && n >= 1 && n <= 12 {
+			return Key(0x70 + n - 1), nil
 		}
 	}
 
-	return hotkeylib.Key(0), fmt.Errorf("unsupported key: %s", part)
+	return 0, fmt.Errorf("unsupported key: %s", part)
 }
 
 func normalizeShortcut(input string) string {
@@ -349,12 +293,12 @@ func normalizeShortcut(input string) string {
 
 func (m *Manager) logInfo(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Info(format, v...)
+		logger.Wrapped(m.logger).Info(format, v...)
 	}
 }
 
 func (m *Manager) logDebug(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Debug(format, v...)
+		logger.Wrapped(m.logger).Debug(format, v...)
 	}
 }
