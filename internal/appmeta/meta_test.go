@@ -64,9 +64,11 @@ func TestBridgePipeCandidates(t *testing.T) {
 }
 
 func TestFirstExistingPath_Hit(t *testing.T) {
-	got := FirstExistingPath([]string{"/tmp", "/nonexistent"})
-	if got != "/tmp" {
-		t.Fatalf("FirstExistingPath = %q, want /tmp", got)
+	// 用测试自己的临时目录：Windows 上 "/tmp" 指当前盘符的 \tmp，未必存在。
+	dir := t.TempDir()
+	got := FirstExistingPath([]string{dir, filepath.Join(dir, "nonexistent")})
+	if got != dir {
+		t.Fatalf("FirstExistingPath = %q, want %q", got, dir)
 	}
 }
 
