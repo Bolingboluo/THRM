@@ -57,6 +57,11 @@ type Manager struct {
 	// held 为真时暂停自动拉起，见 Hold。
 	held atomic.Bool
 
+	// 启动参数。launchDisableGpu 取自最近一次温度选择，让 GPU 监测开关从进程启动起
+	// 就生效；skipIntelGcl 在桥接因 Intel GCL 崩溃后置位，本次运行期间不再复位。
+	launchDisableGpu atomic.Bool
+	skipIntelGcl     atomic.Bool
+
 	// 最近一次真实读取结果，供 GetStatus 作为诊断数据复用，避免状态查询自己发命令。
 	lastTemp   types.BridgeTemperatureData
 	lastTempAt int64
@@ -69,6 +74,7 @@ const (
 	bridgeExitTimeout           = 2 * time.Second
 	bridgeProcessExitWait       = 3 * time.Second
 	bridgeStartupTimeout        = 30 * time.Second
+	bridgeStderrDrainWait       = 2 * time.Second
 	bridgeStartRetryBase        = 5 * time.Second
 	bridgeStartRetryMax         = 2 * time.Minute
 
@@ -324,45 +330,81 @@ func (m *Manager) startStdio() error {
 
 	m.logger.Info("找到桥接程序: %s", bridgePath)
 
-	cmd := exec.Command(bridgePath)
+	intelGclCrash, err := m.launchStdio(bridgePath, setFailed)
+	if err != nil && intelGclCrash && !m.skipIntelGcl.Load() {
+		// 显卡驱动 ControlLib.dll 内部的访问冲突 .NET 接不住，每次启动都会必现，
+		// 退避重试没有意义；跳过 Intel GCL 立即重启，CPU 与其它 GPU 的温度不受影响。
+		m.skipIntelGcl.Store(true)
+		m.logger.Warn("桥接程序在 Intel GCL（显卡驱动 ControlLib.dll）中崩溃，跳过 Intel GCL 后重新启动")
+		_, err = m.launchStdio(bridgePath, setFailed)
+	}
+	return err
+}
+
+// launchStdio 拉起一次桥接进程并完成启动握手。intelGclCrash 报告进程是否在握手前
+// 因 Intel GCL 崩溃，供 startStdio 决定是否换参数重试。
+func (m *Manager) launchStdio(bridgePath string, setFailed func(error)) (intelGclCrash bool, err error) {
+	var args []string
+	if m.launchDisableGpu.Load() {
+		args = append(args, "--disable-gpu")
+	}
+	if m.skipIntelGcl.Load() {
+		args = append(args, "--skip-intel-gcl")
+	}
+	if len(args) > 0 {
+		m.logger.Info("桥接程序启动参数: %s", strings.Join(args, " "))
+	}
+
+	cmd := exec.Command(bridgePath, args...)
 	configureCmdSysProcAttr(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		setFailed(err)
-		return fmt.Errorf("创建 stdin 管道失败: %v", err)
+		return false, fmt.Errorf("创建 stdin 管道失败: %v", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		setFailed(err)
-		return fmt.Errorf("创建 stdout 管道失败: %v", err)
+		return false, fmt.Errorf("创建 stdout 管道失败: %v", err)
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		setFailed(err)
-		return fmt.Errorf("创建 stderr 管道失败: %v", err)
+		return false, fmt.Errorf("创建 stderr 管道失败: %v", err)
 	}
 
 	startAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		setFailed(err)
-		return fmt.Errorf("启动桥接程序失败: %v", err)
+		return false, fmt.Errorf("启动桥接程序失败: %v", err)
 	}
 
-	go m.forwardBridgeStderr(stderr)
+	var sawIntelGcl atomic.Bool
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		m.forwardBridgeStderr(stderr, &sawIntelGcl)
+	}()
 
 	lineCh := startLineReader(stdout)
 	if err := m.waitForReady(lineCh, bridgeStartupTimeout); err != nil {
 		m.logger.Error("桥接程序启动握手失败（已等待 %s）: %v", time.Since(startAt).Round(time.Millisecond), err)
 		_ = stdin.Close()
 		_ = cmd.Process.Kill()
+		// 崩溃堆栈经 stderr 输出，可能晚于 stdout 关闭才读完；先等它读完再判断
+		// 崩溃原因，也避免 Wait 抢先关闭管道丢掉堆栈。进程已被终止，管道很快到 EOF。
+		select {
+		case <-stderrDone:
+		case <-time.After(bridgeStderrDrainWait):
+		}
 		// 异步回收进程，避免句柄/僵尸进程泄漏；Wait 会同时关闭残留管道。
 		go func() { _ = cmd.Wait() }()
 		go drainLines(lineCh)
 		setFailed(err)
-		return err
+		return sawIntelGcl.Load(), err
 	}
 
 	// 握手成功后才发布通信句柄。若期间发生了 Stop（stopping/stopped），
@@ -375,7 +417,7 @@ func (m *Manager) startStdio() error {
 		_ = cmd.Process.Kill()
 		go func() { _ = cmd.Wait() }()
 		go drainLines(lineCh)
-		return errStartAborted
+		return false, errStartAborted
 	}
 	m.cmd = cmd
 	m.stdin = stdin
@@ -387,11 +429,12 @@ func (m *Manager) startStdio() error {
 	m.setState(BridgeStateRunning, nil)
 	m.mutex.Unlock()
 	m.logger.Info("桥接程序启动成功（耗时 %s），通信方式: stdio", time.Since(startAt).Round(time.Millisecond))
-	return nil
+	return false, nil
 }
 
-// forwardBridgeStderr 把桥接进程的 stderr 输出转发到日志。
-func (m *Manager) forwardBridgeStderr(stderr io.Reader) {
+// forwardBridgeStderr 把桥接进程的 stderr 输出转发到日志，并在出现 Intel GCL
+// 崩溃堆栈时置位 sawIntelGcl。
+func (m *Manager) forwardBridgeStderr(stderr io.Reader, sawIntelGcl *atomic.Bool) {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 4096), 256*1024)
 	for scanner.Scan() {
@@ -402,6 +445,9 @@ func (m *Manager) forwardBridgeStderr(stderr io.Reader) {
 		if strings.HasPrefix(line, "[init]") {
 			m.logger.Info("桥接程序: %s", line)
 		} else {
+			if strings.Contains(line, "IntelGcl.") {
+				sawIntelGcl.Store(true)
+			}
 			m.logger.Error("桥接程序 stderr: %s", line)
 		}
 	}
@@ -681,6 +727,7 @@ func (m *Manager) stopUnsafe() {
 
 func (m *Manager) GetTemperature(selection types.TemperatureSelection) types.BridgeTemperatureData {
 	selection = types.NormalizeTemperatureSelection(selection)
+	m.launchDisableGpu.Store(selection.DisableGpu)
 	selectionPayload, err := json.Marshal(selection)
 	if err != nil {
 		return types.BridgeTemperatureData{
@@ -800,6 +847,9 @@ func (m *Manager) GetStatus() map[string]any {
 		"pipeName":    pipeName,
 		"transport":   transport,
 		"lastError":   lastError,
+	}
+	if m.skipIntelGcl.Load() {
+		status["intelGclSkipped"] = true
 	}
 	// 上一次真实读取的结果作为诊断数据，避免为了填充状态面板而额外发一次命令。
 	if lastTempAt > 0 {

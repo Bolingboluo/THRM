@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Text;
@@ -211,6 +212,8 @@ namespace THRM.TempBridge
         // 是否启用 GPU 硬件监控。停用时 LibreHardwareMonitor 完全不初始化 GPU
         // 子系统（NVAPI/NVML 等），避免混合显卡笔记本的独显被轮询唤醒。
         private static bool gpuMonitoringEnabled = true;
+        // 为避开会崩溃的 GPU 驱动接口而强制停用时，不允许监测设置再把 GPU 打开。
+        private static bool gpuMonitoringForcedOff = false;
         private static bool extendedSensorsEnabled = false;
         private static bool running = true;
         private static readonly object lockObject = new object();
@@ -239,6 +242,17 @@ namespace THRM.TempBridge
 
             bool diagnosticMode = ShouldRunDiagnosticMode(args);
             bool pipeMode = ShouldRunPipeMode(args);
+
+            // 启动参数必须在首次 InitializeHardwareMonitor 之前生效：主程序的监测设置
+            // 要等第一条 GetTemperature 才送达，而 GPU 子系统的崩溃就发生在那之前。
+            if (HasArg(args, "--disable-gpu"))
+            {
+                gpuMonitoringEnabled = false;
+            }
+            if (HasArg(args, "--skip-intel-gcl"))
+            {
+                DisableIntelGcl();
+            }
 
             try
             {
@@ -435,6 +449,37 @@ namespace THRM.TempBridge
         static bool ShouldRunPipeMode(string[] args)
         {
             return HasArg(args, "--pipe");
+        }
+
+        /// <summary>
+        /// 让 LibreHardwareMonitor 跳过 Intel GCL（驱动自带的 ControlLib.dll）。
+        /// 部分机器上 IntelGcl.ctlEnumerateDevices 会在驱动内部触发 AccessViolation，
+        /// .NET 无法捕获这类异常，桥接进程会在握手前直接崩溃，连 CPU 温度都读不到。
+        /// 跳过 GCL 只损失 Intel 独显遥测，核显仍走 D3D 路径。LHM 没有公开开关，
+        /// 只能通过反射把 IsAvailable 置为 false；找不到时退化为停用整个 GPU 监测。
+        /// </summary>
+        static void DisableIntelGcl()
+        {
+            try
+            {
+                Type gclType = typeof(Computer).Assembly.GetType("LibreHardwareMonitor.Interop.IntelGcl", false);
+                PropertyInfo availableProperty = gclType?.GetProperty("IsAvailable", BindingFlags.Public | BindingFlags.Static);
+                if (availableProperty != null && availableProperty.CanWrite)
+                {
+                    availableProperty.SetValue(null, false);
+                    LogInitProgress("已按启动参数跳过 Intel GCL（ControlLib.dll）");
+                    return;
+                }
+
+                LogInitProgress("未找到 IntelGcl.IsAvailable，改为停用 GPU 监测以避开 Intel GCL");
+            }
+            catch (Exception ex)
+            {
+                LogInitProgress("跳过 Intel GCL 失败，改为停用 GPU 监测: " + ex.Message);
+            }
+
+            gpuMonitoringEnabled = false;
+            gpuMonitoringForcedOff = true;
         }
 
         static bool HasArg(string[] args, string expected)
@@ -1254,7 +1299,7 @@ namespace THRM.TempBridge
             {
                 // GPU 监测开关变化时重建硬件监控实例：只有在 Computer 层面关闭
                 // IsGpuEnabled 才能真正停止 NVAPI/NVML 轮询，避免独显被持续唤醒。
-                bool wantGpu = selection == null || !selection.DisableGpu;
+                bool wantGpu = !gpuMonitoringForcedOff && (selection == null || !selection.DisableGpu);
                 bool wantExtended = selection != null && selection.ExtendedSensors;
                 if (wantGpu != gpuMonitoringEnabled || wantExtended != extendedSensorsEnabled)
                 {
