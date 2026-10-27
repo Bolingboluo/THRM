@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 import { apiService } from '../services/api';
 import { configService } from '../services/config-service';
 import { deviceService, type DeviceStatusPayload } from '../services/device-service';
@@ -388,7 +388,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setConfig: (config) => set({ config, error: null }),
 
   startEventListeners: () => {
-    if (typeof window === 'undefined' || !(window as any).runtime?.EventsOnMultiple) {
+    if (typeof window === 'undefined') {
       return () => {};
     }
     const unsubscribers: Array<() => void> = [];

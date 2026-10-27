@@ -79,10 +79,10 @@ THRM 项目已通过 Go 构建标签实现了部分平台分离，**15 个 `*_ot
 
 ```
 THRM/
-├── main.go                          # GUI 入口 (Wails)
-├── app.go                           # Wails 绑定表面
+├── main.go                          # GUI 入口 (Wails v3)
 ├── cmd/core/main.go                 # 核心服务入口
-├── wails.json                       # Wails 配置
+├── build/config.yml                 # Wails v3 项目配置（版本号唯一来源）
+├── Taskfile.yml                     # wails3 task 构建任务
 ├── themes_embed.go                  # 主题嵌入
 ├── go.mod / go.sum                  # Go 模块
 │
@@ -184,7 +184,7 @@ THRM/
 │       ├── app/                     # UI 页面和组件
 │       ├── components/ui/           # shadcn/ui 组件
 │       ├── locales/                 # ✅ 国际化翻译（zh-CN, en-US, ja-JP）
-│       └── wailsjs/                 # Wails JS 运行时绑定
+│   └── bindings/                    # wails3 generate bindings 生成的强类型绑定
 │
 ├── bridge/TempBridge/Program.cs     # ❌ C# 温度桥接（需完全替代）
 ├── themes/                          # ✅ 主题文件
@@ -195,8 +195,7 @@ THRM/
 ├── build/                           # ❌ Windows 构建产物
 ├── build.bat                        # ❌ Windows 批处理
 ├── build_bridge.bat                 # ❌ Windows 桥接构建
-├── BS2PRO-Controller.sln            # ❌ VS 解决方案
-└── lib/                             # ❌ LibreHardwareMonitorLib.dll
+└── BS2PRO-Controller.sln            # ❌ VS 解决方案
 ```
 
 图例：✅ 可直接复用 | ⚠️ 需小幅修改 | ❌ 需实现或替换
@@ -293,7 +292,7 @@ sudo apt install libhidapi-dev
 sudo apt install bluez
 
 # Wails v2 Linux 前端 (WebKit2GTK)
-sudo apt install libgtk-3-dev libwebkit2gtk-4.0-dev
+sudo apt install libgtk-4-dev libwebkitgtk-6.0-dev
 
 # Node.js / Bun（用于构建前端）
 curl -fsSL https://bun.sh/install | bash
@@ -421,7 +420,7 @@ require (
     go.uber.org/zap v1.28.0
     gopkg.in/natefinch/lumberjack.v2 v2.2.1
     github.com/gen2brain/beeep v0.11.2
-    github.com/wailsapp/wails/v2 v2.12.0
+    github.com/wailsapp/wails/v3 v3.0.0
 )
 ```
 
@@ -430,7 +429,7 @@ require (
 | 排除的依赖 | 原因 |
 |-----------|------|
 | `github.com/Microsoft/go-winio` | Windows 命名管道（仅 `transport_windows.go` 使用） |
-| `github.com/wailsapp/go-webview2` | Windows WebView2（Linux 用 WebKit2GTK） |
+| `github.com/wailsapp/go-webview2` | Windows WebView2（Linux 用 WebKitGTK 6.0） |
 | `github.com/jchv/go-winloader` | Windows PE 加载器 |
 | `github.com/saltosystems/winrt-go` | Windows Runtime 绑定 |
 | `github.com/go-ole/go-ole` | Windows OLE/COM |
@@ -1224,30 +1223,11 @@ func EnsureCoreServiceRunning() bool {
 
 ### 任务 5.5：Wails 配置文件
 
-**文件**：`wails.json`
+**文件**：`build/config.yml`
 
-```json
-{
-    "name": "thrm",
-    "outputfilename": "thrm",
-    "frontend:install": "bun install",
-    "frontend:build": "bun run build",
-    "frontend:dev:watcher": "bun run dev",
-    "frontend:dev:serverUrl": "http://localhost:5173",
-    "author": {
-        "name": "",
-        "email": ""
-    },
-    "info": {
-        "productVersion": "4.0.0-linux",
-        "companyName": "",
-        "productName": "THRM Fan Control",
-        "comments": "Linux port of THRM"
-    }
-}
-```
-
-**移除**：`"nsisType": "multiple"`（NSIS 是 Windows 安装包工具）。
+迁移到 Wails v3 后不再有 `wails.json`：产品信息与版本号写在 `build/config.yml` 的 `info` 段，
+`dev_mode` 段驱动 `wails3 dev`，构建步骤见仓库根目录的 `Taskfile.yml`（`wails3 task build`）。
+Linux 默认链接 GTK4 + WebKitGTK 6.0；老发行版可传 `EXTRA_TAGS=gtk3` 改用 GTK3 栈（Wails v3.1 前可用）。
 
 ### 任务 5.6：构建脚本
 
@@ -1468,7 +1448,6 @@ CGO_ENABLED=1 go build ...
 | `build_bridge.bat` | Windows 批处理脚本 |
 | `build.bat` | Windows 批处理脚本 |
 | `build/` 目录 | Windows 构建产物 |
-| `lib/LibreHardwareMonitorLib.dll` | Windows DLL |
 | `BS2PRO-Controller.sln` | Visual Studio 解决方案文件 |
 | 所有 `*_windows.go` 文件 | Windows 专有实现，不应出现在 Linux 二进制中 |
 | `cmd/core/fatal_log_windows.go` | Windows 专有崩溃日志（需新建 `fatal_log_linux.go`） |

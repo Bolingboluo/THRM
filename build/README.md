@@ -1,35 +1,22 @@
 # Build Directory
 
-The build directory is used to house all the build files and assets for your application. 
+Build configuration and assets for the THRM GUI (Wails v3). Run the tasks from the repository root
+with `wails3 task <name>` — see [`Taskfile.yml`](../Taskfile.yml).
 
-The structure is:
-
-* bin - Output directory
-* darwin - macOS specific files
-* windows - Windows specific files
-
-## Mac
-
-The `darwin` directory holds files specific to Mac builds.
-These may be customised and used as part of the build. To return these files to the default state, simply delete them
-and
-build with `wails build`.
-
-The directory contains the following files:
-
-- `Info.plist` - the main plist file used for Mac builds. It is used when building using `wails build`.
-- `Info.dev.plist` - same as the main plist file but used when building using `wails dev`.
+* `config.yml` - Wails v3 project configuration. `info.version` is the single source of the THRM
+  version; `build.bat`, `build.sh`, CI and `PKGBUILD` all read it. `dev_mode` drives `wails3 dev`.
+* `appicon.png` - Application icon, also embedded as the Linux window icon.
+* `bin` - Output directory.
+* `.wails` - Assets rendered from `config.yml` during a build (ignored by git).
 
 ## Windows
 
-The `windows` directory contains the manifest and rc files used when building with `wails build`.
-These may be customised for your application. To return these files to the default state, simply delete them and
-build with `wails build`.
-
-- `icon.ico` - The icon used for the application. This is used when building using `wails build`. If you wish to
-  use a different icon, simply replace this file with your own. If it is missing, a new `icon.ico` file
-  will be created using the `appicon.png` file in the build directory.
-- `installer/*` - The files used to create the Windows installer. These are used when building using `wails build`.
-- `info.json` - Application details used for Windows builds. The data here will be used by the Windows installer,
-  as well as the application itself (right click the exe -> properties -> details)
-- `wails.exe.manifest` - The main application manifest file.
+* `icon.ico` - Executable and installer icon.
+* `info.json` - Version resource template; `@VERSION@` is replaced with `info.version` at build time.
+  It deliberately declares `FileVersion` and the fixed `product_version`, which Wails' own template
+  omits (Windows then shows no version details at all).
+* `wails.exe.manifest` - Application manifest. Maintained by hand because THRM requires
+  administrator rights; it is not regenerated from `config.yml`.
+* `installer/*` - NSIS installer. `wails_tools.nsh` is re-rendered from `config.yml` on every build
+  (`wails3 task assets`) and is not tracked by git; run a build (or `wails3 task assets`) before calling
+  `makensis` by hand. `project.nsi` and the other files are maintained by hand.

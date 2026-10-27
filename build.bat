@@ -2,21 +2,21 @@
 setlocal enabledelayedexpansion
 echo Building THRM...
 
+REM build/config.yml info.version is the single source of the version (also used for exe resources and the installer).
+set "PRODUCT_VERSION="
+for /f "tokens=2 delims=:# " %%a in ('findstr /R /C:"^  *version:" build\config.yml') do (
+    if "!PRODUCT_VERSION!"=="" set "PRODUCT_VERSION=%%~a"
+)
+if "!PRODUCT_VERSION!"=="" (
+    echo ERROR: Could not extract info.version from build\config.yml
+    exit /b 1
+)
+
 if not "%THRM_BUILD_VERSION%"=="" (
     set "VERSION=%THRM_BUILD_VERSION%"
     echo Building version from THRM_BUILD_VERSION: !VERSION!
 ) else (
-    REM Extract version from wails.json
-    for /f "tokens=2 delims=:, " %%a in ('findstr /C:"\"productVersion\"" wails.json') do (
-        set VERSION=%%a
-        set VERSION=!VERSION:"=!
-    )
-)
-
-if "!VERSION!"=="" (
-    echo WARNING: Could not extract version from wails.json, using dev
-    set VERSION=dev
-) else (
+    set "VERSION=!PRODUCT_VERSION!"
     echo Building version: !VERSION!
 )
 
@@ -35,9 +35,13 @@ if not exist "build\windows\icon.ico" (
     echo WARNING: build\windows\icon.ico not found, executable/installer icon may be incorrect
 )
 
-REM Build main application with wails
+REM Build the GUI and the NSIS installer with the Wails v3 Taskfile
 echo Building main application...
-wails build -nsis -ldflags "!LDFLAGS!"
+wails3 task package VERSION=!VERSION! PRODUCT_VERSION=!PRODUCT_VERSION!
+if errorlevel 1 (
+    echo ERROR: GUI build failed!
+    exit /b 1
+)
 
 REM Ensure core service is in the bin directory for installer
 if exist "build\bin\THRM Core.exe" (

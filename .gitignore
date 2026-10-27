@@ -21,3 +21,8 @@ temp/LibreHardwareMonitor/
 # 厂商固件镜像与反汇编产物：仅本地分析用，不随仓库分发。
 # 固件为飞智版权内容，反汇编体积大且非构建所需；协议结论见 docs/bs2pro-ota-ble-commands.md。
 ota/
+
+# Wails v3 构建中间产物（syso 资源文件已由上方规则忽略）
+build/.wails
+.task
+build/windows/installer/MicrosoftEdgeWebview2Setup.exe

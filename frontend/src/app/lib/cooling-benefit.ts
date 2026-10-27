@@ -5,7 +5,7 @@
 // 必须真的盯着温度看它是否还在漂——提前采样得到的是过渡态，画出来的曲线
 // 会把"还没热起来"当成"散热器有效"。
 import { apiService } from '../services/api';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 
 export const BENEFIT_MIN_RPM = 1000;
 export const BENEFIT_MAX_RPM = 4000;

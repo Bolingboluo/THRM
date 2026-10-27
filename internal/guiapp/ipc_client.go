@@ -8,8 +8,8 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/TIANLI0/THRM/internal/ipc"
+	"github.com/TIANLI0/THRM/internal/plugins/fnqpowermode"
 	"github.com/TIANLI0/THRM/internal/types"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ipcRequestPolicy 返回请求的超时与"重连后是否可自动重发"。
@@ -120,20 +120,20 @@ func coreServiceUnavailableMessage(detail string) string {
 }
 
 func (a *App) emitCoreServiceError(detail string) {
-	if a.ctx == nil {
+	if a.app == nil {
 		return
 	}
 	a.coreStatusMutex.Lock()
 	defer a.coreStatusMutex.Unlock()
 	a.coreServiceOK = false
-	runtime.EventsEmit(a.ctx, "core-service-error", coreServiceUnavailableMessage(detail))
+	a.emit(eventCoreServiceError, coreServiceUnavailableMessage(detail))
 }
 
 // emitCoreServiceOK 只在状态跳变（启动后首次成功、从异常恢复）时通知前端。
 // 前端只关心这次跳变（据此重新同步），此前每个成功请求都发一次，
 // 白白给 webview 灌了大量无用事件。
 func (a *App) emitCoreServiceOK() {
-	if a.ctx == nil {
+	if a.app == nil {
 		return
 	}
 	a.coreStatusMutex.Lock()
@@ -141,7 +141,7 @@ func (a *App) emitCoreServiceOK() {
 	if !a.markCoreServiceOKLocked() {
 		return
 	}
-	runtime.EventsEmit(a.ctx, "core-service-ok", nil)
+	a.emit(eventCoreServiceOK)
 }
 
 // markCoreServiceOKLocked 把状态置为正常，返回这是否是一次跳变。调用方须持有 coreStatusMutex。
@@ -163,21 +163,22 @@ func (a *App) markCoreServiceDegraded() {
 }
 
 // handleCoreEvent 处理核心服务推送的事件
+//
+// 推给前端的事件都在 events.go 里注册了载荷类型，Wails 会按类型校验，所以这里一律先把
+// 核心的 JSON 解码成对应结构体再转发（forwardCoreEvent），不能把 json.RawMessage 原样塞过去。
 func (a *App) handleCoreEvent(event ipc.Event) {
-	if a.ctx == nil {
+	if a.app == nil {
 		return
 	}
 
 	switch event.Type {
 	// 三类高频遥测在窗口隐藏（已退订）时不再转给 webview；恢复显示时 GUI 会主动补一份
 	// 完整状态。核心侧也已按订阅过滤，这里兜住旧版核心以及退订生效前的那几帧。
-	// 风扇数据与历史点是核心用同一份结构体 json.Marshal 出来的，原样转发与"解码成结构体
-	// 再由 Wails 编码"得到的 JSON 完全相同，省掉一次解码与编码。
 	case ipc.EventFanDataUpdate:
 		if a.coreEventsPaused() || len(event.Data) == 0 {
 			return
 		}
-		runtime.EventsEmit(a.ctx, "fan-data-update", event.Data)
+		forwardCoreEvent[types.FanData](a, event.Type, event.Data)
 
 	case ipc.EventTemperatureUpdate:
 		var temp ipc.TemperatureEvent
@@ -190,71 +191,65 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 			if !ok {
 				a.resyncTemperatureCatalog()
 			}
-			runtime.EventsEmit(a.ctx, "temperature-update", merged)
+			a.emit(event.Type, merged)
 		}
 
 	case ipc.EventTemperatureHistoryUpdate:
 		if a.coreEventsPaused() || len(event.Data) == 0 {
 			return
 		}
-		runtime.EventsEmit(a.ctx, "temperature-history-update", event.Data)
+		forwardCoreEvent[types.TemperatureHistoryPoint](a, event.Type, event.Data)
 
 	case ipc.EventTimelineEvent:
-		var timelineEvent types.TimelineEvent
-		if err := json.Unmarshal(event.Data, &timelineEvent); err == nil {
-			runtime.EventsEmit(a.ctx, "timeline-event", timelineEvent)
-		}
+		forwardCoreEvent[types.TimelineEvent](a, event.Type, event.Data)
 
 	case ipc.EventFirmwareUpdate:
-		// 固件刷写进度/日志/完成，原样转发给前端。
+		// 固件刷写进度/日志/完成。
 		if len(event.Data) > 0 {
-			runtime.EventsEmit(a.ctx, "firmware-update", event.Data)
+			forwardCoreEvent[FirmwareFlashEvent](a, event.Type, event.Data)
 		}
 
 	case ipc.EventDeviceConnected:
 		// 载荷里除了字符串字段还嵌着 deviceSettings 对象，按 map[string]string 解码
 		// 会整体失败，前端每次连接都拿不到设备设置。
-		var deviceInfo map[string]any
+		deviceInfo := map[string]any{}
 		json.Unmarshal(event.Data, &deviceInfo)
 		a.mutex.Lock()
 		a.isConnected = true
 		a.mutex.Unlock()
-		runtime.EventsEmit(a.ctx, "device-connected", deviceInfo)
+		a.emit(event.Type, deviceInfo)
 
 	case ipc.EventDeviceDisconnected:
 		a.mutex.Lock()
 		a.isConnected = false
 		a.mutex.Unlock()
-		runtime.EventsEmit(a.ctx, "device-disconnected", nil)
+		a.emit(event.Type)
 
 	case ipc.EventDeviceError:
 		var errMsg string
 		json.Unmarshal(event.Data, &errMsg)
-		runtime.EventsEmit(a.ctx, "device-error", errMsg)
+		a.emit(event.Type, errMsg)
+
+	case ipc.EventDeviceSettingsUpdate:
+		forwardCoreEvent[types.DeviceSettings](a, event.Type, event.Data)
 
 	case ipc.EventConfigUpdate:
-		var cfg types.AppConfig
-		if err := json.Unmarshal(event.Data, &cfg); err == nil {
-			runtime.EventsEmit(a.ctx, "config-update", cfg)
-		}
+		forwardCoreEvent[types.AppConfig](a, event.Type, event.Data)
 
 	case ipc.EventSmartLightUpdate:
-		var status types.SmartTempLightStatus
-		if err := json.Unmarshal(event.Data, &status); err == nil {
-			runtime.EventsEmit(a.ctx, "smart-light-update", status)
-		}
+		forwardCoreEvent[types.SmartTempLightStatus](a, event.Type, event.Data)
 
 	case ipc.EventHotkeyTriggered:
-		var payload map[string]any
-		if err := json.Unmarshal(event.Data, &payload); err == nil {
-			runtime.EventsEmit(a.ctx, "hotkey-triggered", payload)
-		}
+		forwardCoreEvent[HotkeyTriggered](a, event.Type, event.Data)
 
 	case ipc.EventLegionPowerModeUpdate:
-		var payload map[string]any
-		if err := json.Unmarshal(event.Data, &payload); err == nil {
-			runtime.EventsEmit(a.ctx, "legion-power-mode-update", payload)
-		}
+		forwardCoreEvent[fnqpowermode.PowerModeState](a, event.Type, event.Data)
+
+	case ipc.EventLegionFnQSupportUpdate:
+		forwardCoreEvent[LegionFnQSupport](a, event.Type, event.Data)
+
+	case ipc.EventFlydigiCompatUpdate:
+		forwardCoreEvent[FlydigiCompatStatus](a, event.Type, event.Data)
 
 	case ipc.EventHealthPing, ipc.EventHeartbeat:
 		// 心跳只用于核心侧探活（写超时即摘除假死的客户端），前端没有任何监听者，
@@ -267,10 +262,9 @@ func (a *App) handleCoreEvent(event ipc.Event) {
 		a.QuitApp()
 
 	default:
-		// 其余事件（device-settings-update、legion-fnq-support-update、flydigi-compat-update 等）
-		// 由前端直接消费，GUI 无需解读，原样转发。此前这里漏掉的事件会被静默丢弃，
-		// 核心新增事件时也不必再同步修改 GUI。
-		runtime.EventsEmit(a.ctx, event.Type, event.Data)
+		// 核心新增、GUI 还不认识的事件原样转发，前端可以先用起来，不必同步修改 GUI；
+		// 它们没有注册载荷类型，前端拿到的是未加类型的 JSON。
+		a.emit(event.Type, event.Data)
 	}
 }
 

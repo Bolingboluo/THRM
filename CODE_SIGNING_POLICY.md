@@ -92,7 +92,7 @@ artifacts.
 
 All signed artifacts carry product name and version metadata, generated from
 [`build/windows/info.json`](build/windows/info.json) and the version declared in
-[`wails.json`](wails.json).
+[`build/config.yml`](build/config.yml).
 
 ### Signed artifacts
 

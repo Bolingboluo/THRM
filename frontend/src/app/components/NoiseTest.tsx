@@ -8,7 +8,7 @@ import { AudioLines, Check, Mic, Play, RotateCw, TriangleAlert, Volume2, X } fro
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import clsx from 'clsx';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 import { apiService } from '../services/api';
 import { holdCoreTelemetry } from '../hooks/useCoreEventSubscription';
 import {

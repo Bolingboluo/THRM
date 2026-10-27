@@ -1,7 +1,6 @@
 package guiapp
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,34 +11,27 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/TIANLI0/THRM/internal/ipc"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-var wailsContext *context.Context
 var ensureCoreServiceRunningMu sync.Mutex
 
-// SetWailsContext 保存当前 Wails 上下文，供单实例回调恢复窗口使用。
-func SetWailsContext(ctx context.Context) {
-	wailsContext = &ctx
-}
+// OnSecondInstanceLaunch 在用户再次启动 GUI 时把已有窗口带到前台。
+//
+//wails:ignore
+func (a *App) OnSecondInstanceLaunch(data application.SecondInstanceData) {
+	mainLogger.Infof("检测到第二个实例启动，参数: %s，工作目录: %s", strings.Join(data.Args, ","), data.WorkingDir)
 
-// OnSecondInstanceLaunch 处理第二个 GUI 实例启动时的窗口恢复逻辑。
-func OnSecondInstanceLaunch(secondInstanceData options.SecondInstanceData) {
-	println("检测到第二个实例启动，参数:", strings.Join(secondInstanceData.Args, ","))
-	println("工作目录:", secondInstanceData.WorkingDirectory)
-
-	if wailsContext != nil {
-		wailsruntime.WindowUnminimise(*wailsContext)
-		wailsruntime.WindowShow(*wailsContext)
-		wailsruntime.WindowSetAlwaysOnTop(*wailsContext, true)
-		go func() {
-			time.Sleep(1 * time.Second)
-			wailsruntime.WindowSetAlwaysOnTop(*wailsContext, false)
-		}()
-
-		wailsruntime.EventsEmit(*wailsContext, "secondInstanceLaunch", secondInstanceData.Args)
+	if a.window == nil {
+		return
 	}
+	a.window.UnMinimise()
+	a.window.Show().Focus()
+	// 短暂置顶，确保窗口能盖过当前前台程序（Windows 会拦截后台进程抢焦点）。
+	a.window.SetAlwaysOnTop(true)
+	time.AfterFunc(time.Second, func() {
+		a.window.SetAlwaysOnTop(false)
+	})
 }
 
 // EnsureCoreServiceRunning 确保核心服务正在运行。
@@ -47,21 +39,13 @@ func EnsureCoreServiceRunning() bool {
 	ensureCoreServiceRunningMu.Lock()
 	defer ensureCoreServiceRunningMu.Unlock()
 
-	exePath, err := os.Executable()
-	if err == nil {
-		tempDir := os.TempDir()
-		if strings.HasPrefix(exePath, tempDir) {
-			mainLogger.Info("检测到绑定生成模式，跳过核心服务启动")
-			return true
-		}
-	}
-
 	if ipc.CheckCoreServiceRunning() {
 		mainLogger.Info("核心服务已经在运行")
 		return true
 	}
 
 	mainLogger.Info("核心服务未运行，正在启动...")
+	exePath, err := os.Executable()
 	if err != nil {
 		mainLogger.Errorf("获取可执行文件路径失败: %v", err)
 		return false

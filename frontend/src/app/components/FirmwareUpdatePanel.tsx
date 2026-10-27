@@ -94,7 +94,7 @@ export function FirmwareUpdatePanel({ open, onOpenChange, t }: Props) {
 
   const pickLocal = useCallback(async () => {
     try {
-      const path = await (window as any).go?.main?.App?.SelectFirmwareFile?.();
+      const path = await apiService.selectFirmwareFile();
       if (path) {
         setLocalPath(path);
         setSelected({ source: 'local', version: '', name: path, info: '', date: '', url: '' });

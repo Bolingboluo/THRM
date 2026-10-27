@@ -39,9 +39,9 @@ import {
   PanelBottom,
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { Environment } from '../../../wailsjs/runtime/runtime';
-import { QuitAll } from '../../../wailsjs/go/main/App';
-import { types } from '../../../wailsjs/go/models';
+import { System } from '@wailsio/runtime';
+import { App } from '@go/guiapp';
+import * as types from '@go/types';
 import { toast } from 'sonner';
 import { DebugInfo, type DeviceDebugCommandResult, type DeviceSettings, type FlydigiCompatStatus, type ThemeMeta } from '../types/app';
 import { type AppLocale, useLocale } from '../lib/i18n';
@@ -688,9 +688,9 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
 
   useEffect(() => {
     let disposed = false;
-    void Environment()
+    void System.Environment()
       .then((env) => {
-        if (!disposed) setIsWindowsPlatform(env.platform === 'windows');
+        if (!disposed) setIsWindowsPlatform(env.OS === 'windows');
       })
       .catch(() => {});
     return () => {
@@ -1191,7 +1191,7 @@ function ControlPanel({ config, onConfigChange, isConnected, temperature, legion
   // 托盘关掉之后，托盘菜单里的"退出"就没了：这里补一个出口，否则用户只能去任务管理器结束后台。
   const handleQuitAll = useCallback(async () => {
     try {
-      await QuitAll();
+      await App.QuitAll();
     } catch (e) {
       toast.error(t('controlPanel.system.quitAllFailed', { error: getErrorMessage(e) }));
     }

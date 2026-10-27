@@ -41,8 +41,8 @@ import {
   type TemperatureHistoryPoint,
 } from '../lib/temperature-history';
 import type { CurveFocusTarget } from '../store/app-store';
-import { types } from '../../../wailsjs/go/models';
-import { ClipboardSetText } from '../../../wailsjs/runtime/runtime';
+import * as types from '@go/types';
+import { Clipboard as WailsClipboard } from '@wailsio/runtime';
 import { BS1_MANUAL_GEAR_PRESETS, getManualGearLabel, getManualLevelLabel, MANUAL_GEAR_PRESETS, getEffectiveManualGearPresets, normalizeManualGearRpmMap, MANUAL_GEAR_RPM_MAX, MANUAL_GEAR_RPM_MIN, type ManualGearRpmMap } from '../lib/manualGearPresets';
 import { useTranslation } from 'react-i18next';
 import FanCurveProfileToolbar from './FanCurveProfileToolbar';
@@ -1634,7 +1634,7 @@ const FanCurve = memo(function FanCurve({ config, onConfigChange, isConnected, d
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(code);
       } else {
-        await ClipboardSetText(code);
+        await WailsClipboard.SetText(code);
       }
       toast.success(t('fanCurve.toast.exportCopied'));
     } catch (e) {

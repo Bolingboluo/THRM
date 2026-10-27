@@ -9,7 +9,6 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/ipc"
 	"github.com/TIANLI0/THRM/internal/types"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // coreEventSubscriptionTimeout 是订阅/退订请求的超时。核心直接在 IPC 层处理它们，
@@ -77,22 +76,19 @@ func (a *App) coreEventsPaused() bool {
 func (a *App) emitTelemetrySnapshot() {
 	a.emitTemperatureSnapshot()
 
-	if a.ctx == nil {
+	if a.app == nil {
 		return
 	}
 	resp, err := a.sendRequest(ipc.ReqGetCurrentFanData, nil)
 	if err != nil || resp == nil || !resp.Success || isJSONNull(resp.Data) {
 		return
 	}
-	var fanData types.FanData
-	if err := json.Unmarshal(resp.Data, &fanData); err == nil {
-		runtime.EventsEmit(a.ctx, "fan-data-update", fanData)
-	}
+	forwardCoreEvent[types.FanData](a, ipc.EventFanDataUpdate, resp.Data)
 }
 
 // emitTemperatureSnapshot 用核心的完整温度快照刷新缓存并推给前端。
 func (a *App) emitTemperatureSnapshot() {
-	if a.ctx == nil {
+	if a.app == nil {
 		return
 	}
 	resp, err := a.sendRequest(ipc.ReqGetTemperature, nil)
@@ -103,7 +99,7 @@ func (a *App) emitTemperatureSnapshot() {
 	if err := json.Unmarshal(resp.Data, &temp); err != nil {
 		return
 	}
-	runtime.EventsEmit(a.ctx, "temperature-update", a.mergeCurrentTemp(temp))
+	a.emit(ipc.EventTemperatureUpdate, a.mergeCurrentTemp(temp))
 }
 
 // mergeTemperatureEvent 还原温度事件并并入缓存。ok=false 表示有一组传感器读数

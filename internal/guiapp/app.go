@@ -1,7 +1,6 @@
 package guiapp
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,11 +8,17 @@ import (
 	"github.com/TIANLI0/THRM/internal/ipc"
 	"github.com/TIANLI0/THRM/internal/theme"
 	"github.com/TIANLI0/THRM/internal/types"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// App struct - GUI 应用程序结构
+// App 是绑定给前端的 Wails 服务（见 service.go 的生命周期钩子）。
 type App struct {
-	ctx       context.Context
+	// app 在 ServiceStartup 时才赋值；为 nil 表示 Wails 尚未就绪（单元测试里也一直是 nil），
+	// 此时所有窗口操作与事件推送都直接跳过。
+	app *application.App
+	// window 是主窗口，由 main 在 Run 之前通过 AttachWindow 注入。
+	window *application.WebviewWindow
+
 	ipcClient *ipc.Client
 	mutex     sync.RWMutex
 

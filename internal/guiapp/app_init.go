@@ -1,8 +1,6 @@
 package guiapp
 
 import (
-	"context"
-
 	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/TIANLI0/THRM/internal/ipc"
 	"github.com/TIANLI0/THRM/internal/theme"
@@ -22,10 +20,8 @@ func New(themeManager *theme.Manager) *App {
 	}
 }
 
-// Startup 应用启动时调用
-func (a *App) Startup(ctx context.Context) {
-	a.ctx = ctx
-
+// startup 连接核心服务，由 ServiceStartup 在后台协程里调用。
+func (a *App) startup() {
 	guiLogger.Infof("=== %s GUI 启动 ===", appmeta.AppName)
 
 	// 看护协程负责在核心重启/连接失效后自动重连并让前端重新同步状态，
@@ -68,10 +64,4 @@ func (a *App) Startup(ctx context.Context) {
 // GetAppVersion 返回应用版本号（来自版本模块）
 func (a *App) GetAppVersion() string {
 	return version.Get()
-}
-
-// OnWindowClosing 窗口关闭事件处理
-func (a *App) OnWindowClosing(ctx context.Context) bool {
-	a.captureWindowState()
-	return false
 }

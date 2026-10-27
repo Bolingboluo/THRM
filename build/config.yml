@@ -1,0 +1,48 @@
+# Wails v3 项目配置。info.version 是 THRM 版本号的唯一来源：
+# build.bat / build.sh、CI 与 PKGBUILD 都从这里读取版本。
+version: '3'
+
+info:
+  companyName: "TIANLI0"
+  productName: "THRM"
+  productIdentifier: "top.tianli0.thrm"
+  description: "THRM 桌面控制中心"
+  copyright: "Copyright © 2026 TIANLI0"
+  comments: "THRM 桌面控制中心"
+  version: "3.8.0"
+
+# wails3 dev：Go 侧改动自动重编译重启，前端走 Next 开发服务器热更新。
+dev_mode:
+  root_path: .
+  log_level: warn
+  debounce: 1000
+  ignore:
+    dir:
+      - .git
+      - node_modules
+      - frontend
+      - build
+      - bin
+      - bridge
+      - website
+      - temp
+    file:
+      - .DS_Store
+      - .gitignore
+      - .gitkeep
+      - "*_test.go"
+    watched_extension:
+      - "*.go"
+    git_ignore: true
+  executes:
+    - cmd: wails3 task build DEV=true
+      type: blocking
+    - cmd: wails3 task frontend:dev
+      type: background
+      # 端口与 Taskfile 的 DEV_PORT 默认值一致（wails3 dev -port 可改）。
+      readiness:
+        http: "http://localhost:9245/"
+        timeout: "120s"
+    - cmd: wails3 task run
+      type: primary
+      exit_policy: shutdown

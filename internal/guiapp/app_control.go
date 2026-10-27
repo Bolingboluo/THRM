@@ -5,22 +5,27 @@ import (
 	"fmt"
 
 	"github.com/TIANLI0/THRM/internal/ipc"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ShowWindow 显示主窗口
 func (a *App) ShowWindow() {
-	if a.ctx != nil {
-		runtime.WindowShow(a.ctx)
-		runtime.WindowSetAlwaysOnTop(a.ctx, false)
+	if a.window != nil {
+		a.window.Show().SetAlwaysOnTop(false)
 	}
 }
 
 // HideWindow 隐藏主窗口到托盘
 func (a *App) HideWindow() {
-	if a.ctx != nil {
+	if a.window != nil {
 		a.captureWindowState()
-		runtime.WindowHide(a.ctx)
+		a.window.Hide()
+	}
+}
+
+// quit 退出 GUI 进程。服务的 ServiceShutdown 会随后执行。
+func (a *App) quit() {
+	if a.app != nil {
+		a.app.Quit()
 	}
 }
 
@@ -36,9 +41,7 @@ func (a *App) QuitApp() {
 		a.ipcClient.Close()
 	}
 
-	if a.ctx != nil {
-		runtime.Quit(a.ctx)
-	}
+	a.quit()
 }
 
 // QuitAll 完全退出应用（包括核心服务）
@@ -56,9 +59,7 @@ func (a *App) QuitAll() {
 		a.ipcClient.Close()
 	}
 
-	if a.ctx != nil {
-		runtime.Quit(a.ctx)
-	}
+	a.quit()
 }
 
 // requestCoreQuit 通知核心退出。只用现有连接，断开时至多直连一次仍在运行的核心；
@@ -78,11 +79,6 @@ func (a *App) requestCoreQuit() {
 	if _, err := a.ipcClient.SendRequestWithTimeout(ipc.ReqQuitApp, nil, timeout); err != nil {
 		guiLogger.Warnf("通知核心服务退出失败: %v", err)
 	}
-}
-
-// InitSystemTray 初始化系统托盘（保持API兼容，实际由核心服务处理）
-func (a *App) InitSystemTray() {
-	// 托盘由核心服务管理，GUI 不需要处理
 }
 
 // UpdateGuiResponseTime 更新GUI响应时间（供前端调用）

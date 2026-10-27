@@ -32,7 +32,7 @@ import {
   RotateCcw,
   Sparkles,
 } from 'lucide-react';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 import { apiService } from '../services/api';
 import { useTemperatureHistory } from '../hooks/useTemperatureHistory';
 import { useAppStore } from '../store/app-store';

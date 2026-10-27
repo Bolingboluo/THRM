@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { SetCoreEventSubscription } from '../../../wailsjs/go/main/App';
+import { App } from '@go/guiapp';
 
 // 窗口不可见（最小化或收进托盘）时暂停高频遥测：GUI 不再把风扇/温度推送转给页面，
 // 并向核心退订，核心便回到后台低频采样。窗口重新可见时恢复订阅，GUI 会立即补推一份
@@ -27,7 +27,7 @@ function syncSubscription() {
   lastSent = active;
   inFlight = true;
   Promise.resolve()
-    .then(() => SetCoreEventSubscription(active))
+    .then(() => App.SetCoreEventSubscription(active))
     .catch(() => {
       // 非 Wails 环境（例如纯浏览器预览）没有后端绑定；其余失败在下一次变化时重试。
       lastSent = null;

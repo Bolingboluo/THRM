@@ -18,7 +18,7 @@ func TestWatchdogStandsDownDuringShutdown(t *testing.T) {
 
 	app.shuttingDown.Store(true)
 	// reconnectCore 必须在触碰 EnsureCoreServiceRunning 之前直接返回。
-	// a.ctx 为 nil，若它继续往下走就会在 emit 时因空上下文暴露出来。
+	// 若它继续往下走，就会真的去探测并拉起本机的核心服务。
 	app.reconnectCore()
 }
 

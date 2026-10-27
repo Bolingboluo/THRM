@@ -198,7 +198,7 @@ jobs:
       - name: Install Wails CLI and go-winres
         shell: pwsh
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
           go install github.com/tc-hib/go-winres@latest
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:USERPROFILE 'go\bin')
 
@@ -508,8 +508,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
-            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libgtk-4-dev libwebkitgtk-6.0-dev \
             libhidapi-dev libudev-dev
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Cache frontend dependencies
         uses: actions/cache@v4
@@ -536,14 +538,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # wails.json 是版本的唯一来源；PKGBUILD 的 pkgver 由它派生，不再需要比对两者。
-          # 这里只确保 wails.json 真的能被解析出来，解析不出来就没必要继续打包。
-          PRODUCT_VER=$(grep -oE '"productVersion"[[:space:]]*:[[:space:]]*"[^"]+"' wails.json | sed -E 's/.*"([^"]+)"$/\1/')
+          # build/config.yml 的 info.version 是版本的唯一来源；PKGBUILD 的 pkgver 由它派生，不再需要比对两者。
+          # 这里只确保它真的能被解析出来，解析不出来就没必要继续打包。
+          PRODUCT_VER=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' build/config.yml | head -n1)
           if [ -z "$PRODUCT_VER" ]; then
-            echo "无法从 wails.json 解析 productVersion" >&2
+            echo "无法从 build/config.yml 解析 info.version" >&2
             exit 1
           fi
-          echo "wails.json productVersion: $PRODUCT_VER"
+          echo "build/config.yml info.version: $PRODUCT_VER"
 
           VER="${THRM_BUILD_VERSION:-$PRODUCT_VER}"
           [ -n "$VER" ] || VER="dev"
@@ -570,7 +572,7 @@ jobs:
           # 预发布的版本号必须落在正确的升级链上，否则 apt 会拒绝升级，而且不会报错。
           # 早先固定写 0.0.0 会让每个预发布看起来都比任何正式版旧，永远升不上去。
           #
-          # 分两种情形，取决于 wails.json 有没有领先于最近一个正式版：
+          # 分两种情形，取决于 build/config.yml 的版本有没有领先于最近一个正式版：
           #   领先（正在开发 3.7.0，上个正式版是 3.6.5）→ 3.7.0~nightly.X
           #     dpkg 里 ~ 排在空之前，于是它低于 3.7.0，将来升正式版是升级。
           #   持平（3.7.0 已发布，版本号还没往上 bump）→ 3.7.0+nightly.X
@@ -615,7 +617,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: amd64
-          Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libhidapi-hidraw0
+          Depends: libgtk-4-1, libwebkitgtk-6.0-4, libhidapi-hidraw0
           Recommends: bluez
           Maintainer: TIANLI0 <wutianli@tianli0.top>
           Description: THRM
@@ -654,7 +656,7 @@ jobs:
 
           VER="${THRM_BUILD_VERSION:-}"
           if [ -z "$VER" ]; then
-            VER=$(grep -oE '"productVersion"[[:space:]]*:[[:space:]]*"[^"]+"' wails.json | sed -E 's/.*"([^"]+)"$/\1/')
+            VER=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' build/config.yml | head -n1)
           fi
           [ -n "$VER" ] || VER="dev"
 
@@ -679,7 +681,7 @@ jobs:
 
           # 预发布必须高于上一个正式版、低于下一个正式版。pacman 的 vercmp 只在容器里有，
           # 顺带塞进下面那次 docker run 里校验，排错了直接让构建失败。
-          NEXT_VER=$(grep -oE '"productVersion"[[:space:]]*:[[:space:]]*"[^"]+"' wails.json | sed -E 's/.*"([^"]+)"$/\1/')
+          NEXT_VER=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' build/config.yml | head -n1)
 
           BUILDER_UID=$(id -u)
           docker run --rm \
@@ -696,7 +698,7 @@ jobs:
                   echo "预发布 $ARCH_CHECK_VER 没有高于上一个正式版 $ARCH_CHECK_BASE" >&2
                   exit 1
                 fi
-                # wails.json 与上个正式版持平时没有"下一个版本"可比，跳过上界检查。
+                # build/config.yml 与上个正式版持平时没有"下一个版本"可比，跳过上界检查。
                 if [ "$(vercmp "$ARCH_CHECK_NEXT" "$ARCH_CHECK_BASE")" -gt 0 ] \
                    && [ "$(vercmp "$ARCH_CHECK_VER" "$ARCH_CHECK_NEXT")" -ge 0 ]; then
                   echo "预发布 $ARCH_CHECK_VER 没有低于下一个正式版 $ARCH_CHECK_NEXT" >&2

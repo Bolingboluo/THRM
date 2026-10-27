@@ -21,8 +21,8 @@ import {
   PanelLeftClose,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { BrowserOpenURL, Environment, Quit, WindowIsMaximised, WindowMinimise, WindowToggleMaximise } from '../../../wailsjs/runtime/runtime';
-import { WindowBlurEnabled } from '../../../wailsjs/go/main/App';
+import { Browser, System, Window } from '@wailsio/runtime';
+import { App } from '@go/guiapp';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { BRAND } from '../lib/brand';
@@ -532,7 +532,7 @@ export default function AppShell({
 
   const syncWindowState = useCallback(async () => {
     try {
-      setIsMaximised(await WindowIsMaximised());
+      setIsMaximised(await Window.IsMaximised());
     } catch {
       setIsMaximised(false);
     }
@@ -544,9 +544,9 @@ export default function AppShell({
 
     const initializeWindowChrome = async () => {
       try {
-        const env = await Environment();
+        const env = await System.Environment();
         if (disposed) return;
-        const isWindows = env.platform === 'windows';
+        const isWindows = env.OS === 'windows';
         setIsWindowsChrome(isWindows);
         if (!isWindows) {
           setNativeBackdrop(false);
@@ -554,7 +554,7 @@ export default function AppShell({
           return;
         }
         try {
-          setNativeBackdrop(await WindowBlurEnabled());
+          setNativeBackdrop(await App.WindowBlurEnabled());
         } catch {
           setNativeBackdrop(true);
         }
@@ -583,13 +583,13 @@ export default function AppShell({
   }, [syncWindowState]);
 
   const handleToggleMaximise = useCallback(() => {
-    WindowToggleMaximise();
+    void Window.ToggleMaximise();
     scheduleWindowStateSync();
   }, [scheduleWindowStateSync]);
 
   const handleOpenRepository = useCallback(() => {
     try {
-      BrowserOpenURL(BRAND.repositoryUrl);
+      void Browser.OpenURL(BRAND.repositoryUrl);
     } catch {
       window.open(BRAND.repositoryUrl, '_blank', 'noopener,noreferrer');
     }
@@ -659,9 +659,9 @@ export default function AppShell({
           isMaximised={isMaximised}
           leftOffset={sidebarWidth}
           leftSlot={<StatusBadges isConnected={isConnected} autoControl={autoControl} compact />}
-          onMinimise={() => WindowMinimise()}
+          onMinimise={() => void Window.Minimise()}
           onToggleMaximise={handleToggleMaximise}
-          onClose={() => Quit()}
+          onClose={() => void Window.Close()}
         />
       )}
 

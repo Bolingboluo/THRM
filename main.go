@@ -1,20 +1,21 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"os"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/TIANLI0/THRM/internal/guiapp"
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	linuxoptions "github.com/wailsapp/wails/v2/pkg/options/linux"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+// appIcon 是 Linux 下的窗口/任务栏图标；Windows 的图标随 .syso 资源嵌进可执行文件。
+//
+//go:embed build/appicon.png
+var appIcon []byte
 
 func main() {
 	if !guiapp.EnsureCoreServiceRunning() {
@@ -32,59 +33,53 @@ func main() {
 		}
 	}
 
-	app := NewApp()
+	gui := guiapp.New(newThemeManager())
 
-	// 读取上次记忆的窗口尺寸/状态（GUI 本地持久化，独立于 IPC 核心服务）。
-	windowState := guiapp.LoadWindowState()
+	app := application.New(application.Options{
+		Name:        appmeta.AppName,
+		Description: "THRM 桌面控制中心",
+		Icon:        appIcon,
+		Services: []application.Service{
+			application.NewService(gui),
+		},
+		Assets: application.AssetOptions{
+			Handler: application.AssetFileServerFS(assets),
+		},
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID:               "d2111a29-a967-4e46-807f-2fb5fcff9ed4-gui",
+			OnSecondInstanceLaunch: gui.OnSecondInstanceLaunch,
+		},
+		Linux: application.LinuxOptions{
+			ProgramName:   "thrm",
+			ApplicationID: "top.tianli0.thrm",
+		},
+	})
 
-	windowStartState := options.Normal
-	if windowState.Maximised {
-		windowStartState = options.Maximised
+	windowOptions := application.WebviewWindowOptions{
+		Name:      "main",
+		Title:     appmeta.AppName,
+		MinWidth:  800,
+		MinHeight: 600,
+		Frameless: guiapp.DefaultFrameless(),
+		URL:       "/",
+		Linux: application.LinuxWindow{
+			WebviewGpuPolicy: application.WebviewGpuPolicyAlways,
+		},
 	}
+	// 上次记忆的窗口尺寸、位置与最大化状态（GUI 本地持久化，独立于 IPC 核心服务）。
+	guiapp.LoadWindowState().ApplyTo(&windowOptions)
+	guiapp.ApplyWindowBackdrop(&windowOptions)
 	for _, arg := range os.Args {
 		if arg == "--autostart" || arg == "/autostart" || arg == "-autostart" {
 			// 自启动优先以最小化到托盘启动，覆盖记忆的窗口状态。
-			windowStartState = options.Minimised
+			windowOptions.StartState = application.WindowStateMinimised
 			break
 		}
 	}
 
-	// 创建应用
-	err := wails.Run(&options.App{
-		Title:            appmeta.AppName,
-		Width:            windowState.Width,
-		Height:           windowState.Height,
-		MinWidth:         800,
-		MinHeight:        600,
-		Frameless:        guiapp.DefaultFrameless(),
-		WindowStartState: windowStartState,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
+	gui.AttachWindow(app.Window.NewWithOptions(windowOptions))
 
-		OnStartup: func(ctx context.Context) {
-			guiapp.SetWailsContext(ctx)
-			app.Startup(ctx)
-			// 窗口就绪后恢复上次记忆的位置（尺寸/最大化已在选项中应用）。
-			app.RestoreWindowPosition(windowState)
-		},
-		OnBeforeClose: app.OnWindowClosing,
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId:               "d2111a29-a967-4e46-807f-2fb5fcff9ed4-gui",
-			OnSecondInstanceLaunch: guiapp.OnSecondInstanceLaunch,
-		},
-		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
-		Linux: &linuxoptions.Options{
-			WebviewGpuPolicy: linuxoptions.WebviewGpuPolicyAlways,
-			ProgramName:      "thrm",
-		},
-		Windows: guiapp.ResolveWindowsOptions(),
-		Bind: []any{
-			app,
-		},
-	})
-
-	if err != nil {
+	if err := app.Run(); err != nil {
 		println("Error:", err.Error())
 	}
 }

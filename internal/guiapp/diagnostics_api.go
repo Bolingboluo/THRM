@@ -14,7 +14,7 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
 	"github.com/TIANLI0/THRM/internal/types"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 type diagnosticManifest struct {
@@ -92,14 +92,11 @@ func (a *App) collectDiagnosticHardware() diagnosticHardware {
 }
 
 func (a *App) ExportDiagnosticPackage() (string, error) {
-	if a.ctx == nil {
-		return "", fmt.Errorf("application is not ready")
-	}
 	name := fmt.Sprintf("THRM-diagnostics-%s.zip", time.Now().Format("20060102-150405"))
-	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
-		Title:           "Export THRM diagnostics",
-		DefaultFilename: name,
-		Filters:         []wailsruntime.FileFilter{{DisplayName: "ZIP archive", Pattern: "*.zip"}},
+	path, err := a.promptSaveFile(application.SaveFileDialogOptions{
+		Title:    "Export THRM diagnostics",
+		Filename: name,
+		Filters:  []application.FileFilter{{DisplayName: "ZIP archive", Pattern: "*.zip"}},
 	})
 	if err != nil || strings.TrimSpace(path) == "" {
 		return "", err

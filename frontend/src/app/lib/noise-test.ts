@@ -5,7 +5,7 @@
 // 相对声级（dBFS-A）。麦克风未经声学校准，绝对声压级不可知，
 // 因此所有结果都以扫频中最安静的点为 0 dB 的「相对噪音」表示。
 import { apiService } from '../services/api';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 
 export interface NoiseProfilePoint {
   rpm: number;

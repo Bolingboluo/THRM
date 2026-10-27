@@ -1,0 +1,108 @@
+# THRM GUI 的 Wails v3 构建任务，用 `wails3 task <任务名>` 运行（无需单独安装 Task）。
+# 版本号由 build.bat / build.sh 从 build/config.yml 解析后通过 VERSION= 传入。
+#
+#   wails3 task build            构建 GUI（build/bin/THRM[.exe]）
+#   wails3 task package          Windows：构建并打 NSIS 安装包
+#   wails3 task bindings         只重新生成前端绑定
+#   wails3 dev                   开发模式（见 dev 任务）
+version: '3'
+
+vars:
+  APP_NAME: THRM
+  BIN_DIR: '{{.BIN_DIR | default "build/bin"}}'
+  # 渲染到这里的 Wails 构建资源（info.json、wails_tools.nsh 等）是构建中间产物，已加入 .gitignore。
+  ASSETS_DIR: build/.wails
+  VERSION: '{{.VERSION | default "dev"}}'
+  # 写进 exe 版本资源与安装包的版本号，只能是纯数字的 x.y.z。
+  PRODUCT_VERSION: '{{.PRODUCT_VERSION | default "0.0.0"}}'
+  DEV_PORT: '{{.WAILS_VITE_PORT | default "9245"}}'
+  LDFLAGS: -X github.com/TIANLI0/THRM/internal/version.BuildVersion={{.VERSION}}
+  GO_TAGS: '{{if eq .DEV "true"}}{{.EXTRA_TAGS}}{{else}}production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}}{{end}}'
+
+tasks:
+  frontend:install:
+    dir: frontend
+    sources:
+      - package.json
+      - bun.lock
+    generates:
+      - node_modules
+    cmds:
+      - bun install
+
+  bindings:
+    summary: 用静态分析生成前端绑定（服务方法、模型与强类型事件）
+    cmds:
+      # guiapp 里的 RegisterEvent 只有把该包列为扫描目标，生成器才能看到。
+      # 生成 JS（JSDoc 带完整类型）而不是 TS：生成代码用 "./x.js" 引用同目录模块，
+      # Turbopack 不会把它解析回 .ts 文件。
+      - wails3 generate bindings -clean=true -d frontend/bindings -silent . ./internal/guiapp
+
+  frontend:build:
+    deps: [frontend:install, bindings]
+    dir: frontend
+    # 开发模式页面由 Next 开发服务器提供，只要 dist 在（go:embed 需要）就不必重新打包。
+    status:
+      - '{{if eq .DEV "true"}}test -d dist{{else}}exit 1{{end}}'
+    cmds:
+      - bun run build
+
+  frontend:dev:
+    deps: [frontend:install, bindings]
+    dir: frontend
+    cmds:
+      - bun run dev --port {{.DEV_PORT}}
+
+  assets:
+    summary: 按 build/config.yml 渲染构建资源，只取需要的文件（manifest 用仓库里要求管理员权限的那份）
+    cmds:
+      - wails3 update build-assets -config build/config.yml -dir {{.ASSETS_DIR}} -name {{.APP_NAME}} -binaryname {{.APP_NAME}} -productversion {{.PRODUCT_VERSION}} -silent
+      - wails3 tool cp {{.ASSETS_DIR}}/windows/nsis/wails_tools.nsh build/windows/installer/wails_tools.nsh
+      # Wails 自带的 info.json 模板缺 FileVersion 字符串与固定 product_version，资源管理器和
+      # FileVersionInfo 会读不到任何版本信息，所以用仓库里完整的那份替换版本号后覆盖它。
+      # WriteAllText 默认写无 BOM 的 UTF-8，Go 的 JSON 解析不认 BOM。
+      - cmd: powershell -NoProfile -Command "[IO.File]::WriteAllText('{{.ASSETS_DIR}}/windows/info.json', [IO.File]::ReadAllText('build/windows/info.json').Replace('@VERSION@', '{{.PRODUCT_VERSION}}'))"
+        platforms: [windows]
+
+  build:
+    summary: 构建 GUI
+    cmds:
+      - task: build:{{OS}}
+
+  build:windows:
+    internal: true
+    deps:
+      - task: frontend:build
+      - task: assets
+    cmds:
+      - wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest build/windows/wails.exe.manifest -info {{.ASSETS_DIR}}/windows/info.json -out wails_windows_amd64.syso
+      - defer: '{{if eq OS "windows"}}powershell -NoProfile -Command Remove-Item -ErrorAction SilentlyContinue wails_windows_amd64.syso{{else}}rm -f wails_windows_amd64.syso{{end}}'
+      - go build {{if .GO_TAGS}}-tags {{.GO_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="{{if ne .DEV "true"}}-s -w -H windowsgui {{end}}{{.LDFLAGS}}" -o "{{.BIN_DIR}}/{{.APP_NAME}}.exe" .
+
+  build:linux:
+    internal: true
+    deps:
+      - task: frontend:build
+    cmds:
+      # 默认链接 GTK4 + WebKitGTK 6.0；需要老发行版的 GTK3 栈时传 EXTRA_TAGS=gtk3。
+      - go build {{if .GO_TAGS}}-tags {{.GO_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="{{if ne .DEV "true"}}-s -w {{end}}{{.LDFLAGS}}" -o "{{.BIN_DIR}}/thrm" .
+    env:
+      CGO_ENABLED: 1
+
+  package:
+    summary: Windows：构建 GUI 并打 NSIS 安装包（THRM Core.exe 需事先构建好）
+    deps: [build]
+    dir: build/windows/installer
+    cmds:
+      - wails3 generate webview2bootstrapper -dir .
+      # 单引号保住反斜杠：Task 用内置的 sh 解释器执行命令。
+      - makensis '-DARG_WAILS_AMD64_BINARY=..\..\bin\{{.APP_NAME}}.exe' project.nsi
+
+  run:
+    cmds:
+      - '{{.BIN_DIR}}/{{if eq OS "windows"}}{{.APP_NAME}}.exe{{else}}thrm{{end}}'
+
+  dev:
+    summary: 开发模式：Go 改动自动重编译，前端由 Next 开发服务器热更新
+    cmds:
+      - wails3 dev -config build/config.yml -port {{.DEV_PORT}}

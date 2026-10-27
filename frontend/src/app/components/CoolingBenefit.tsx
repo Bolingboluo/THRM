@@ -22,7 +22,7 @@ import { Activity, Download, Gauge, Play, Thermometer, TriangleAlert, X, Zap } f
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import clsx from 'clsx';
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 import { apiService } from '../services/api';
 import { useAppStore } from '../store/app-store';
 import { holdCoreTelemetry } from '../hooks/useCoreEventSubscription';

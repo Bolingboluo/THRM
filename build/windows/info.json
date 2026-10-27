@@ -1,15 +1,19 @@
 {
 	"fixed": {
-		"file_version": "{{.Info.ProductVersion}}"
+		"file_version": "@VERSION@",
+		"product_version": "@VERSION@"
 	},
 	"info": {
-		"0000": {
-			"ProductVersion": "{{.Info.ProductVersion}}",
-			"CompanyName": "{{.Info.CompanyName}}",
-			"FileDescription": "{{.Info.ProductName}}",
-			"LegalCopyright": "{{.Info.Copyright}}",
-			"ProductName": "{{.Info.ProductName}}",
-			"Comments": "{{.Info.Comments}}"
+		"0409": {
+			"FileVersion": "@VERSION@",
+			"ProductVersion": "@VERSION@",
+			"CompanyName": "TIANLI0",
+			"FileDescription": "THRM",
+			"InternalName": "THRM",
+			"OriginalFilename": "THRM.exe",
+			"LegalCopyright": "Copyright © 2026 TIANLI0",
+			"ProductName": "THRM",
+			"Comments": "THRM 桌面控制中心"
 		}
 	}
 }

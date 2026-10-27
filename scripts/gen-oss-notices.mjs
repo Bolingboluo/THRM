@@ -63,8 +63,8 @@ function goHomepage(path) {
 
 /** 分组；没列到的按默认值归类（Go 归 backend，npm 归 frontend）。 */
 const GROUP_OF = {
-  'github.com/wailsapp/wails/v2': 'framework',
-  'github.com/wailsapp/go-webview2': 'framework',
+  'github.com/wailsapp/wails/v3': 'framework',
+  '@wailsio/runtime': 'framework',
   'github.com/sstallion/go-hid': 'device',
   'tinygo.org/x/bluetooth': 'device',
   'github.com/saltosystems/winrt-go': 'device',

@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { BrowserOpenURL } from '../../../wailsjs/runtime/runtime';
+import { Browser } from '@wailsio/runtime';
 import {
   ChevronDown,
   Code2,
@@ -117,7 +117,7 @@ function licenseToneClass(license: string) {
 
 function openUrl(url: string) {
   try {
-    BrowserOpenURL(url);
+    void Browser.OpenURL(url);
   } catch {
     window.open(url, '_blank', 'noopener,noreferrer');
   }

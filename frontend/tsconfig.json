@@ -26,6 +26,12 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@go/*": [
+        "./bindings/github.com/TIANLI0/THRM/internal/*"
+      ],
+      "@bindings/*": [
+        "./bindings/*"
       ]
     }
   },

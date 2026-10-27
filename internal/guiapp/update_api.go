@@ -12,18 +12,16 @@ import (
 	"time"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const (
 	updateInstallerName    = "THRM-amd64-installer.exe"
-	updateProgressEvent    = "update-download-progress"
 	updateDownloadTimeout  = 10 * time.Minute
 	updateProgressMinDelta = 2
 )
 
-// updateProgress 通过事件向前端汇报下载进度。
-type updateProgress struct {
+// UpdateProgress 通过 update-download-progress 事件向前端汇报下载进度。
+type UpdateProgress struct {
 	Percent  int    `json:"percent"`  // 0-100，-1 表示长度未知
 	Received int64  `json:"received"` // 已下载字节数
 	Total    int64  `json:"total"`    // 总字节数(未知时为 0)
@@ -31,11 +29,8 @@ type updateProgress struct {
 	Message  string `json:"message"`  // 附带信息(错误时为错误文本)
 }
 
-func (a *App) emitUpdateProgress(p updateProgress) {
-	if a.ctx == nil {
-		return
-	}
-	runtime.EventsEmit(a.ctx, updateProgressEvent, p)
+func (a *App) emitUpdateProgress(p UpdateProgress) {
+	a.emit(eventUpdateProgress, p)
 }
 
 // DownloadAndInstallUpdate 下载安装包并以静默(/S)方式全自动安装，期间弹出一个 CMD
@@ -56,12 +51,12 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 	parsed, err := url.Parse(strings.TrimSpace(downloadURL))
 	if err != nil || parsed.Scheme != "https" {
 		e := fmt.Errorf("无效的下载地址")
-		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: e.Error()})
+		a.emitUpdateProgress(UpdateProgress{Percent: -1, Stage: "error", Message: e.Error()})
 		return e
 	}
 	if !isAllowedUpdateHost(parsed.Host) {
 		e := fmt.Errorf("下载地址不在允许的来源内: %s", parsed.Host)
-		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: e.Error()})
+		a.emitUpdateProgress(UpdateProgress{Percent: -1, Stage: "error", Message: e.Error()})
 		return e
 	}
 
@@ -69,7 +64,7 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 	for i, candidate := range updateDownloadCandidates(parsed) {
 		if i > 0 {
 			guiLogger.Warnf("从官网下载更新失败，改用 GitHub 重试: %v", err)
-			a.emitUpdateProgress(updateProgress{Percent: 0, Stage: "downloading"})
+			a.emitUpdateProgress(UpdateProgress{Percent: 0, Stage: "downloading"})
 		}
 		installerPath, err = a.downloadUpdateInstaller(candidate)
 		if err == nil {
@@ -78,11 +73,11 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 	}
 	if err != nil {
 		guiLogger.Errorf("下载更新安装包失败: %v", err)
-		a.emitUpdateProgress(updateProgress{Percent: -1, Stage: "error", Message: err.Error()})
+		a.emitUpdateProgress(UpdateProgress{Percent: -1, Stage: "error", Message: err.Error()})
 		return err
 	}
 
-	a.emitUpdateProgress(updateProgress{Percent: 100, Stage: "installing", Message: ""})
+	a.emitUpdateProgress(UpdateProgress{Percent: 100, Stage: "installing", Message: ""})
 
 	exePath, exeErr := os.Executable()
 	if exeErr != nil {
@@ -92,15 +87,15 @@ func (a *App) DownloadAndInstallUpdate(downloadURL, windowTitle, windowBody, win
 
 	if err := launchUpdateInstaller(installerPath, exePath, windowTitle, windowBody, windowRestarting); err != nil {
 		guiLogger.Errorf("启动更新安装程序失败: %v", err)
-		a.emitUpdateProgress(updateProgress{Percent: 100, Stage: "error", Message: err.Error()})
+		a.emitUpdateProgress(UpdateProgress{Percent: 100, Stage: "error", Message: err.Error()})
 		return err
 	}
 
 	// 静默安装已在后台启动；退出当前进程以便安装程序覆盖文件，安装完成后由辅助进程自动重启。
 	go func() {
 		time.Sleep(800 * time.Millisecond)
-		if a.ctx != nil {
-			runtime.Quit(a.ctx)
+		if a.app != nil {
+			a.app.Quit()
 		} else {
 			os.Exit(0)
 		}
@@ -169,7 +164,7 @@ func (a *App) downloadUpdateInstaller(downloadURL string) (string, error) {
 	defer out.Close()
 
 	total := resp.ContentLength
-	a.emitUpdateProgress(updateProgress{Percent: 0, Total: max64(total, 0), Stage: "downloading"})
+	a.emitUpdateProgress(UpdateProgress{Percent: 0, Total: max64(total, 0), Stage: "downloading"})
 
 	buf := make([]byte, 64*1024)
 	var received int64
@@ -187,7 +182,7 @@ func (a *App) downloadUpdateInstaller(downloadURL string) (string, error) {
 			}
 			if percent < 0 || percent-lastPercent >= updateProgressMinDelta || percent >= 100 {
 				lastPercent = percent
-				a.emitUpdateProgress(updateProgress{Percent: percent, Received: received, Total: max64(total, 0), Stage: "downloading"})
+				a.emitUpdateProgress(UpdateProgress{Percent: percent, Received: received, Total: max64(total, 0), Stage: "downloading"})
 			}
 		}
 		if readErr == io.EOF {

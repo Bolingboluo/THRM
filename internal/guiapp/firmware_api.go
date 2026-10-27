@@ -6,21 +6,17 @@ import (
 
 	"github.com/TIANLI0/THRM/internal/fwupdate"
 	"github.com/TIANLI0/THRM/internal/ipc"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // SelectFirmwareFile 弹出原生文件对话框，让用户选本地 .hex/.bin 固件，返回路径。
 func (a *App) SelectFirmwareFile() (string, error) {
-	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+	return a.promptOpenFile(application.OpenFileDialogOptions{
 		Title: "选择固件文件",
-		Filters: []wailsruntime.FileFilter{
+		Filters: []application.FileFilter{
 			{DisplayName: "固件 (*.hex;*.bin)", Pattern: "*.hex;*.bin"},
 		},
 	})
-	if err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 // FirmwareUpdateStatus 是固件更新面板所需状态（与 coreapp 同构，经 IPC 传输）。

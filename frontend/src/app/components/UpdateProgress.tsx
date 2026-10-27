@@ -6,7 +6,7 @@ import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Download, ExternalLink, Rocket } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { BrowserOpenURL } from '../../../wailsjs/runtime/runtime';
+import { Browser } from '@wailsio/runtime';
 import { BRAND } from '../lib/brand';
 import { useUpdateStore } from '../store/update-store';
 import { Button } from './ui/index';
@@ -120,7 +120,7 @@ export default function UpdateProgress() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => BrowserOpenURL(releaseUrl || BRAND.latestReleaseUrl)}
+                onClick={() => void Browser.OpenURL(releaseUrl || BRAND.latestReleaseUrl)}
                 icon={<ExternalLink className="h-3.5 w-3.5" />}
               >
                 {t('aboutPanel.version.openReleasePage')}

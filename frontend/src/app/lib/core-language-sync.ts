@@ -9,8 +9,8 @@
 // - 补发：核心启动晚于界面或中途重启时，借 core-service-ok / core-resynced 再试一次，
 //   失败不在这里轮询重试。
 import i18n from 'i18next';
-import { SetUILanguage } from '../../../wailsjs/go/main/App';
-import { EventsOn } from '../../../wailsjs/runtime/runtime';
+import { Events } from '@wailsio/runtime';
+import { App } from '@go/guiapp';
 
 const CORE_LANGUAGES = ['zh-CN', 'en-US', 'ja-JP'];
 const SYNC_DEBOUNCE_MS = 400;
@@ -20,9 +20,9 @@ function currentLanguage(): string | null {
   return lang && CORE_LANGUAGES.includes(lang) ? lang : null;
 }
 
-function subscribe(eventName: string, callback: () => void): () => void {
+function subscribe(eventName: keyof Events.CustomEvents, callback: () => void): () => void {
   try {
-    return EventsOn(eventName, callback);
+    return Events.On(eventName, () => callback());
   } catch {
     // 非 Wails 环境（浏览器预览）没有运行时
     return () => {};
@@ -48,7 +48,7 @@ export function startCoreLanguageSync(): () => void {
 
     inFlight = lang;
     try {
-      acknowledged = (await SetUILanguage(lang)) || lang;
+      acknowledged = (await App.SetUILanguage(lang)) || lang;
     } catch {
       // 核心暂不可达：等 core-service-ok / core-resynced 时再补发
     } finally {

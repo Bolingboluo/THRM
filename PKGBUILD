@@ -1,10 +1,10 @@
 # Maintainer: TIANLI0 <wutianli@tianli0.top>
 
 pkgname=thrm-bin
-# 版本以 wails.json 的 productVersion 为唯一来源，避免再出现"忘了同步这一行导致发版被卡"。
+# 版本以 build/config.yml 的 info.version 为唯一来源，避免再出现"忘了同步这一行导致发版被卡"。
 # CI 打 Arch 包时会把这一行整行 sed 成字面量：nightly 需要 0.0.0.rYYYYMMDD 这种 makepkg
-# 能接受的形式，不是 wails.json 里的值。
-pkgver=$(sed -n 's/.*"productVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${startdir}/wails.json" 2>/dev/null)
+# 能接受的形式，不是 build/config.yml 里的值。
+pkgver=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' "${startdir}/build/config.yml" 2>/dev/null | head -n1)
 : "${pkgver:=0.0.0}"
 pkgrel=1
 pkgdesc='Flydigi BS-series laptop cooler controller (prebuilt)'
@@ -15,11 +15,11 @@ depends=(
   'gdk-pixbuf2'
   'glib2'
   'glibc'
-  'gtk3'
+  'gtk4'
   'libx11'
   'libsoup3'
   'systemd-libs'
-  'webkit2gtk-4.1'
+  'webkitgtk-6.0'
 )
 optdepends=('bluez: BS1 BLE support')
 provides=("thrm=${pkgver}")

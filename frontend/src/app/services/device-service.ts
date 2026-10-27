@@ -1,4 +1,4 @@
-import { types } from '../../../wailsjs/go/models';
+import * as types from '@go/types';
 import { apiService } from './api';
 import type { DeviceSettings, LegionPowerModePayload } from '../types/app';
 

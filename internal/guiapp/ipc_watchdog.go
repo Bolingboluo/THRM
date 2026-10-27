@@ -2,8 +2,6 @@ package guiapp
 
 import (
 	"time"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ipcWatchdogInterval 是重连探测周期。
@@ -34,7 +32,7 @@ func (a *App) startIPCWatchdog() {
 			if a.shuttingDown.Load() {
 				return
 			}
-			if a.ctx == nil {
+			if a.app == nil {
 				continue
 			}
 			if a.ipcClient.IsConnected() {
@@ -68,8 +66,5 @@ func (a *App) reconnectCore() {
 }
 
 func (a *App) emitCoreResynced() {
-	if a.ctx == nil {
-		return
-	}
-	runtime.EventsEmit(a.ctx, "core-resynced", nil)
+	a.emit(eventCoreResynced)
 }

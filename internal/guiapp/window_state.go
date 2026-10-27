@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 const windowStateFileName = "window.json"
@@ -110,82 +110,79 @@ func saveWindowState(state WindowState) {
 	}
 }
 
-// RestoreWindowPosition 供 main 在窗口启动后恢复上次记忆的位置。
-func (a *App) RestoreWindowPosition(state WindowState) {
-	a.applyWindowPosition(state)
-}
-
-// PersistWindowState 供外部（如前端或 main）主动触发窗口状态保存。
-func (a *App) PersistWindowState() {
-	a.captureWindowState()
-}
-
-// applyWindowPosition 在窗口启动后恢复位置：仅当记录了有效且落在屏幕范围内的坐标时才定位，
-// 否则保持系统默认（居中），避免窗口被恢复到已断开的显示器之外。
-func (a *App) applyWindowPosition(state WindowState) {
-	if a.ctx == nil || state.Maximised {
+// ApplyTo 把记忆的窗口状态写进主窗口的创建参数。位置在创建时就交给窗口，
+// 不再像以前那样先居中显示、启动后再挪过去；是否还落在屏幕内由 keepWindowOnScreen 兜底。
+func (s WindowState) ApplyTo(options *application.WebviewWindowOptions) {
+	options.Width = s.Width
+	options.Height = s.Height
+	if s.Maximised {
+		options.StartState = application.WindowStateMaximised
 		return
 	}
-	if state.X == windowPositionUnset || state.Y == windowPositionUnset {
+	if s.X == windowPositionUnset || s.Y == windowPositionUnset {
 		return
 	}
-	if !a.positionOnScreen(state.X, state.Y, state.Width, state.Height) {
-		mainLogger.Warnf("记录的窗口位置 (%d,%d) 不在任何屏幕内，忽略并居中", state.X, state.Y)
-		return
-	}
-	wailsruntime.WindowSetPosition(a.ctx, state.X, state.Y)
+	options.InitialPosition = application.WindowXY
+	options.X = s.X
+	options.Y = s.Y
 }
 
-// positionOnScreen 粗粒度判断窗口左上角是否可接受。
-func (a *App) positionOnScreen(x, y, width, height int) bool {
-	screens, err := wailsruntime.ScreenGetAll(a.ctx)
-	if err != nil || len(screens) == 0 {
+// keepWindowOnScreen 在窗口就绪后检查恢复出来的位置：记录它的显示器可能已经断开，
+// 窗口不在任何屏幕内时改为居中。
+func (a *App) keepWindowOnScreen() {
+	if a.app == nil || a.window == nil || a.window.IsMaximised() {
+		return
+	}
+	bounds := a.window.Bounds()
+	if positionOnScreens(a.app.Screen.GetAll(), bounds) {
+		return
+	}
+	mainLogger.Warnf("记录的窗口位置 (%d,%d) 不在任何屏幕内，忽略并居中", bounds.X, bounds.Y)
+	a.window.Center()
+}
+
+// positionOnScreens 判断窗口标题栏是否还能在某块屏幕上点到。窗口坐标与屏幕边界
+// 都是 Wails 统一换算过的 DIP 绝对坐标，多显示器（含负坐标的副屏）都能正确判断。
+// 拿不到屏幕信息时不做干预。
+func positionOnScreens(screens []*application.Screen, window application.Rect) bool {
+	if len(screens) == 0 {
 		return true
 	}
-
-	totalWidth, maxHeight := 0, 0
-	for _, s := range screens {
-		totalWidth += s.Size.Width
-		if s.Size.Height > maxHeight {
-			maxHeight = s.Size.Height
+	// 允许窗口部分越界，但标题栏至少要有一段落在屏幕里，用户才能把它拖回来。
+	const margin = 120
+	for _, screen := range screens {
+		b := screen.Bounds
+		if window.X+window.Width-margin >= b.X && window.X+margin <= b.X+b.Width &&
+			window.Y >= b.Y-margin && window.Y <= b.Y+b.Height-margin {
+			return true
 		}
 	}
-	if totalWidth <= 0 || maxHeight <= 0 {
-		return true
-	}
-
-	// 允许标题栏部分越界，但至少要留出一段可点击区域用于拖回。
-	const margin = 120
-	return x >= -margin && x <= totalWidth-margin &&
-		y >= -margin && y <= maxHeight-margin
+	return false
 }
 
-// captureWindowState 从当前运行时读取窗口几何信息并持久化。
+// captureWindowState 从当前窗口读取几何信息并持久化。
 func (a *App) captureWindowState() {
-	if a.ctx == nil {
+	// 最小化时读到的是系统放到屏幕外的占位坐标，保留上一次记录。
+	if a.window == nil || a.window.IsMinimised() {
 		return
 	}
 
-	maximised := wailsruntime.WindowIsMaximised(a.ctx)
-
-	if maximised {
+	if a.window.IsMaximised() {
 		prev := LoadWindowState()
 		prev.Maximised = true
 		saveWindowState(prev)
 		return
 	}
 
-	w, h := wailsruntime.WindowGetSize(a.ctx)
-	x, y := wailsruntime.WindowGetPosition(a.ctx)
-
+	bounds := a.window.Bounds()
 	state := WindowState{
-		Width:     w,
-		Height:    h,
-		X:         x,
-		Y:         y,
+		Width:     bounds.Width,
+		Height:    bounds.Height,
+		X:         bounds.X,
+		Y:         bounds.Y,
 		Maximised: false,
 	}
-	if w < minWindowWidth || h < minWindowHeight {
+	if state.Width < minWindowWidth || state.Height < minWindowHeight {
 		prev := LoadWindowState()
 		state.Width = prev.Width
 		state.Height = prev.Height

@@ -494,12 +494,12 @@ THRM/
 * Go 1.26.5+
 * Bun
 * Git
-* Wails CLI
+* Wails v3 CLI（wails3）
 
 安装 Wails：
 
 ```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
 ```
 
 ### Windows 额外依赖
@@ -509,7 +509,7 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 * NSIS 3.x，可选，用于生成安装程序
 
 ```bash
-go install github.com/tc-hib/go-winres@latest
+go install github.com/tc-hib/go-winres@v0.3.3
 ```
 
 ### Linux 额外依赖
@@ -521,8 +521,8 @@ sudo apt update
 sudo apt install \
   build-essential \
   pkg-config \
-  libgtk-3-dev \
-  libwebkit2gtk-4.1-dev \
+  libgtk-4-dev \
+  libwebkitgtk-6.0-dev \
   libhidapi-dev \
   libudev-dev
 ```
@@ -538,8 +538,12 @@ cd frontend
 bun install
 cd ..
 
-wails dev
+wails3 task dev
 ```
+
+前端调用的 Go 方法、数据模型与事件载荷类型都由 `wails3 task bindings` 从 Go 源码生成到
+`frontend/bindings`；修改了 `internal/guiapp` 的导出方法或 `events.go` 里注册的事件后需重新生成。
+版本号的唯一来源是 `build/config.yml` 的 `info.version`。
 
 ## Windows 构建
 

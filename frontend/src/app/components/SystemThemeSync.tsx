@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useLayoutEffect } from 'react';
+import { App } from '@go/guiapp';
 import { useAppStore } from '../store/app-store';
 import { apiService } from '../services/api';
 import {
@@ -37,15 +38,7 @@ function writeThemeBootstrapSnapshot(snapshot: ThemeBootstrapSnapshot) {
 
 // 同步 Windows DWM 沉浸式深色模式属性，使 Mica 材质明暗与应用内 .dark 状态保持一致
 function syncWindowsDarkMode(isDark: boolean) {
-  void import('../../../wailsjs/runtime/runtime')
-    .then(({ WindowSetDarkTheme, WindowSetLightTheme }) => {
-      if (isDark) {
-        WindowSetDarkTheme();
-      } else {
-        WindowSetLightTheme();
-      }
-    })
-    .catch(() => {});
+  void App.SetWindowDarkMode(isDark).catch(() => {});
 }
 
 function ensureCustomThemeStyle(css: string) {

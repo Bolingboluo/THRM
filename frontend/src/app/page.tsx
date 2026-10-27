@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, type ComponentProps } from 'react';
 import dynamic from 'next/dynamic';
-import { types } from '../../wailsjs/go/models';
+import * as types from '@go/types';
 import { useShallow } from 'zustand/react/shallow';
 import type { ControlPanelTemperature } from './components/ControlPanel';
 import AppFatalError from './components/AppFatalError';
