@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -34,6 +35,40 @@ type CustomLogger struct {
 	logDir    string
 	atom      zap.AtomicLevel
 	closers   []io.Closer
+
+	wrapped     *CustomLogger
+	wrappedOnce sync.Once
+}
+
+// Logger 是 Wrapped 需要的最小日志接口，types.Logger 满足它。
+type Logger interface {
+	Info(format string, v ...any)
+	Error(format string, v ...any)
+	Warn(format string, v ...any)
+	Debug(format string, v ...any)
+}
+
+// Wrapped 返回给各包 logInfo/logDebug 这类包装函数使用的日志记录器：调用位置多跳过一层，
+// 日志里记下的才是业务代码，而不是包装函数自己那一行。它与原记录器共用输出与日志级别，
+// 每个记录器只构造一次。传入的不是 *CustomLogger（如测试替身）时原样返回。
+func Wrapped(l Logger) Logger {
+	if c, ok := l.(*CustomLogger); ok && c != nil {
+		return c.wrappedLogger()
+	}
+	return l
+}
+
+func (l *CustomLogger) wrappedLogger() *CustomLogger {
+	l.wrappedOnce.Do(func() {
+		zl := l.logger.WithOptions(zap.AddCallerSkip(1))
+		l.wrapped = &CustomLogger{logger: zl, sugar: zl.Sugar(), logDir: l.logDir, atom: l.atom}
+	})
+	return l.wrapped
+}
+
+// newZapLogger 统一调用位置配置：业务代码经 CustomLogger 的方法记日志，跳过这一层。
+func newZapLogger(cores ...zapcore.Core) *zap.Logger {
+	return zap.New(zapcore.NewTee(cores...), zap.AddCaller(), zap.AddCallerSkip(1))
 }
 
 // NewCustomLogger 创建核心服务日志记录器。
@@ -47,7 +82,7 @@ func NewCustomLogger(debugMode bool, installDir string) (*CustomLogger, error) {
 		return nil, err
 	}
 
-	logger := zap.New(zapcore.NewTee(backend.cores...), zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := newZapLogger(backend.cores...)
 	return &CustomLogger{
 		logger:    logger,
 		sugar:     logger.Sugar(),

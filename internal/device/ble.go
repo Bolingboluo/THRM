@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TIANLI0/THRM/internal/deviceproto"
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
 	"tinygo.org/x/bluetooth"
 )
@@ -945,18 +946,18 @@ func (b *BLEManager) SetPowerOnStart(enabled bool) error {
 // 日志辅助方法
 func (b *BLEManager) logInfo(format string, v ...any) {
 	if b.logger != nil {
-		b.logger.Info(format, v...)
+		logger.Wrapped(b.logger).Info(format, v...)
 	}
 }
 
 func (b *BLEManager) logError(format string, v ...any) {
 	if b.logger != nil {
-		b.logger.Error(format, v...)
+		logger.Wrapped(b.logger).Error(format, v...)
 	}
 }
 
 func (b *BLEManager) logDebug(format string, v ...any) {
 	if b.logger != nil {
-		b.logger.Debug(format, v...)
+		logger.Wrapped(b.logger).Debug(format, v...)
 	}
 }

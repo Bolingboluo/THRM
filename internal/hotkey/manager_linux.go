@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
 	hotkeylib "golang.design/x/hotkey"
 )
@@ -363,12 +364,12 @@ func normalizeShortcut(input string) string {
 
 func (m *Manager) logInfo(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Info(format, v...)
+		logger.Wrapped(m.logger).Info(format, v...)
 	}
 }
 
 func (m *Manager) logDebug(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Debug(format, v...)
+		logger.Wrapped(m.logger).Debug(format, v...)
 	}
 }

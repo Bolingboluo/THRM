@@ -9,6 +9,7 @@ import (
 	"github.com/TIANLI0/THRM/internal/curveprofiles"
 	"github.com/TIANLI0/THRM/internal/device"
 	"github.com/TIANLI0/THRM/internal/ipc"
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/powernotify"
 	"github.com/TIANLI0/THRM/internal/smartcontrol"
 	"github.com/TIANLI0/THRM/internal/tray"
@@ -388,19 +389,19 @@ func (a *CoreApp) cleanup() {
 // 日志辅助方法
 func (a *CoreApp) logInfo(format string, v ...any) {
 	if a.logger != nil {
-		a.logger.Info(format, v...)
+		logger.Wrapped(a.logger).Info(format, v...)
 	}
 }
 
 func (a *CoreApp) logError(format string, v ...any) {
 	if a.logger != nil {
-		a.logger.Error(format, v...)
+		logger.Wrapped(a.logger).Error(format, v...)
 	}
 }
 
 func (a *CoreApp) logDebug(format string, v ...any) {
 	if a.logger != nil {
-		a.logger.Debug(format, v...)
+		logger.Wrapped(a.logger).Debug(format, v...)
 	}
 }
 

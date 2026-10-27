@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
 )
 
@@ -493,19 +494,19 @@ func (m *Manager) bumpRevisionLocked() {
 // 日志辅助方法
 func (m *Manager) logInfo(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Info(format, v...)
+		logger.Wrapped(m.logger).Info(format, v...)
 	}
 }
 
 func (m *Manager) logError(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Error(format, v...)
+		logger.Wrapped(m.logger).Error(format, v...)
 	}
 }
 
 func (m *Manager) logDebug(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Debug(format, v...)
+		logger.Wrapped(m.logger).Debug(format, v...)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TIANLI0/THRM/internal/appmeta"
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
 )
 
@@ -792,19 +793,19 @@ func (s *Server) ActiveClientsChanged() <-chan struct{} {
 // 日志辅助方法
 func (s *Server) logInfo(format string, v ...any) {
 	if s.logger != nil {
-		s.logger.Info(format, v...)
+		logger.Wrapped(s.logger).Info(format, v...)
 	}
 }
 
 func (s *Server) logError(format string, v ...any) {
 	if s.logger != nil {
-		s.logger.Error(format, v...)
+		logger.Wrapped(s.logger).Error(format, v...)
 	}
 }
 
 func (s *Server) logDebug(format string, v ...any) {
 	if s.logger != nil {
-		s.logger.Debug(format, v...)
+		logger.Wrapped(s.logger).Debug(format, v...)
 	}
 }
 
@@ -1210,13 +1211,13 @@ func (c *Client) IsConnected() bool {
 // 日志辅助方法
 func (c *Client) logInfo(format string, v ...any) {
 	if c.logger != nil {
-		c.logger.Info(format, v...)
+		logger.Wrapped(c.logger).Info(format, v...)
 	}
 }
 
 func (c *Client) logDebug(format string, v ...any) {
 	if c.logger != nil {
-		c.logger.Debug(format, v...)
+		logger.Wrapped(c.logger).Debug(format, v...)
 	}
 }
 

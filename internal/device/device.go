@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TIANLI0/THRM/internal/deviceproto"
+	"github.com/TIANLI0/THRM/internal/logger"
 	"github.com/TIANLI0/THRM/internal/types"
 	"github.com/sstallion/go-hid"
 )
@@ -1717,24 +1718,24 @@ func (m *Manager) SetBrightness(percentage int) bool {
 // 日志辅助方法
 func (m *Manager) logInfo(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Info(format, v...)
+		logger.Wrapped(m.logger).Info(format, v...)
 	}
 }
 
 func (m *Manager) logError(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Error(format, v...)
+		logger.Wrapped(m.logger).Error(format, v...)
 	}
 }
 
 func (m *Manager) logWarn(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Warn(format, v...)
+		logger.Wrapped(m.logger).Warn(format, v...)
 	}
 }
 
 func (m *Manager) logDebug(format string, v ...any) {
 	if m.logger != nil {
-		m.logger.Debug(format, v...)
+		logger.Wrapped(m.logger).Debug(format, v...)
 	}
 }
