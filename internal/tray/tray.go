@@ -28,6 +28,12 @@ const (
 	trayLoginPhaseWindow = 3 * time.Minute
 	// trayNotifyAreaWatchWindow 注册图标后继续监视通知区域重建的时长，过后交给定期健康检查。
 	trayNotifyAreaWatchWindow = 30 * time.Second
+	// trayIconCheckInterval 是健康监控检查通知区域是否被重建的间隔，只是一次窗口查找，代价很低。
+	trayIconCheckInterval = 30 * time.Second
+	// trayIconFallbackRefresh 是无条件重设托盘图标的兜底间隔。每次重设都要对图标做 md5、
+	// 写临时文件检查并跨进程 Shell_NotifyIcon，Explorer 还会随之重绘；重建已由句柄检查与
+	// TaskbarCreated 覆盖，兜底只需应对两者都漏掉的情况。
+	trayIconFallbackRefresh = 10 * time.Minute
 	// trayReadyRecoveryDelay is the grace period before rebuilding a systray
 	// instance that is initialized but never becomes ready.
 	trayReadyRecoveryDelay = 75 * time.Second
@@ -995,9 +1001,10 @@ func (m *Manager) startIconHealthMonitor(instanceDone <-chan struct{}) {
 		}
 	}()
 
-	// 每30秒刷新一次托盘图标，更及时地恢复 Explorer 重启后的图标
-	ticker := time.NewTicker(30 * time.Second)
+	// 通知区域窗口句柄变化说明 Explorer 重建过，立刻补加图标；否则只按兜底间隔重设。
+	ticker := time.NewTicker(trayIconCheckInterval)
 	defer ticker.Stop()
+	notifyArea := notifyAreaWindow()
 
 	for {
 		select {
@@ -1005,7 +1012,17 @@ func (m *Manager) startIconHealthMonitor(instanceDone <-chan struct{}) {
 			if atomic.LoadInt32(&m.readyState) == 0 || atomic.LoadInt32(&m.initialized) == 0 {
 				continue // 不退出，等待恢复
 			}
-			m.refreshTrayIcon()
+			current := notifyAreaWindow()
+			rebuilt := current != 0 && current != notifyArea
+			if current != 0 {
+				notifyArea = current
+			}
+			if rebuilt {
+				m.logInfo("检测到任务栏通知区域已重建，重新添加托盘图标")
+				m.refreshTrayIcon()
+			} else if time.Since(time.Unix(m.lastIconRefresh.Load(), 0)) >= trayIconFallbackRefresh {
+				m.refreshTrayIcon()
+			}
 		case <-instanceDone:
 			return
 		case <-m.done:
@@ -1152,9 +1169,10 @@ func (m *Manager) CheckHealth() {
 	}
 	m.readyFalseSince.Store(0)
 
-	// 检查图标是否长时间未刷新
+	// 检查图标是否长时间未刷新：健康监控本该按 trayIconFallbackRefresh 重设，
+	// 再超出一个检查周期仍没刷新，说明监控协程卡住或刷新一直没成功。
 	lastRefresh := m.lastIconRefresh.Load()
-	if lastRefresh > 0 && time.Now().Unix()-lastRefresh > 90 {
+	if lastRefresh > 0 && time.Since(time.Unix(lastRefresh, 0)) > trayIconFallbackRefresh+2*trayIconCheckInterval {
 		m.logInfo("检测到托盘图标长时间未刷新，尝试刷新")
 		m.refreshTrayIcon()
 	}

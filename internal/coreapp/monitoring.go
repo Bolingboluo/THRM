@@ -325,6 +325,8 @@ func (a *CoreApp) startTemperatureMonitoring() {
 	learningUnbroadcast := false
 	lastLearningSave := time.Now()
 	lastLearningBroadcast := time.Now()
+	lastLoggedTargetRPM := -1
+	var lastControlLog time.Time
 	lastBridgeUpdateTime := initialTemp.UpdateTime
 	staleBridgeUpdateCount := 0
 	bridgeFailureCount := 0
@@ -715,7 +717,10 @@ monitorLoop:
 					}
 				}
 
-				if baseRPM > 0 {
+				// 目标转速变化时立即记录；不变时按 controlDebugLogInterval 记一行，仍能看出温度走势。
+				if baseRPM > 0 && (targetRPM != lastLoggedTargetRPM || time.Since(lastControlLog) >= controlDebugLogInterval) {
+					lastLoggedTargetRPM = targetRPM
+					lastControlLog = time.Now()
 					a.logDebug("智能控温: 最高=%d°C 基准=%s 当前=%d°C 平均=%d°C 控制温度=%d°C 基础=%dRPM 目标=%dRPM", temp.MaxTemp, temp.ControlSource, temp.ControlTemp, avgTemp, controlTemp, baseRPM, targetRPM)
 				}
 			}
@@ -737,6 +742,9 @@ const (
 	learnedOffsetsSaveInterval = 3 * time.Minute
 	// learnedOffsetsBroadcastInterval 是学习偏移变化后向 GUI 广播配置的最小间隔。
 	learnedOffsetsBroadcastInterval = 25 * time.Second
+	// controlDebugLogInterval 是目标转速不变时"智能控温"调试日志的最小间隔。
+	// 此前调试模式下每个采样周期一行，一天约 8.6 万行，绝大多数内容完全相同。
+	controlDebugLogInterval = 10 * time.Second
 )
 
 // saveLearnedOffsetsIfDirty 把控温循环合并进内存、尚未落盘的学习偏移写盘。
